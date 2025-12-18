@@ -7,6 +7,7 @@
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)](https://pytorch.org/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![原创](https://github.com/NJUxlj/Chinese-MedQA-Qwen2)]
 
 [功能特性](#-功能特性) • [快速开始](#-快速开始) • [模块架构](#-模块架构) • [使用指南](#-使用指南)
 
