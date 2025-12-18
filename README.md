@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**基于 Qwen2 的医疗问答系统 | SFT + RL + RAG + Agent**
+**基于 Qwen2 的医疗问答系统 | 基于项目（https://github.com/NJUxlj/Chinese-MedQA-Qwen2）**
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-orange.svg)](https://pytorch.org/)
