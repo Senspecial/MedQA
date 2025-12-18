@@ -1,0 +1,211 @@
+# ====================================
+# MedQA 项目 Git 忽略文件
+# ====================================
+
+# ----------------------------------
+# 模型权重和检查点（⚠️ 重要：不上传大文件）
+# ----------------------------------
+save/
+*.bin
+*.safetensors
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pb
+*.onnx
+*.tflite
+model_cache/
+checkpoint-*/
+checkpoints/
+
+# ----------------------------------
+# 数据文件（避免上传大数据集）
+# ----------------------------------
+data/
+!data/.gitkeep
+crawled_data/
+processed_data/
+knowledge_base/
+embedding_cache/
+*.csv
+*.tsv
+*.jsonl
+*.parquet
+*.arrow
+*.feather
+
+# JSON 数据文件（训练数据、评估结果等）
+sft.json
+dpo.json
+rl_dataset.json
+eval_results.json
+sft_eval_results.json
+sft_grpo_eval_results.json
+*_eval_results.json
+*.dataset.json
+
+# 保留配置文件（小文件）
+!*config.json
+!*settings.json
+!package.json
+
+# 保留示例数据
+!data/examples/
+!data/test_samples/
+
+# ----------------------------------
+# 日志和输出
+# ----------------------------------
+logs/
+*.log
+output/
+results/
+runs/
+wandb/
+tensorboard/
+mlruns/
+
+# ----------------------------------
+# Python 缓存和编译文件
+# ----------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ----------------------------------
+# 虚拟环境
+# ----------------------------------
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.conda/
+conda-meta/
+
+# ----------------------------------
+# IDE 配置文件
+# ----------------------------------
+.vscode/
+!.vscode/settings.json.example
+!.vscode/launch.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Cursor
+.cursor/
+.cursorignore
+
+# ----------------------------------
+# Jupyter Notebook
+# ----------------------------------
+.ipynb_checkpoints
+*.ipynb
+!examples/*.ipynb
+!docs/*.ipynb
+
+# ----------------------------------
+# 测试和覆盖率
+# ----------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+pytest_debug.log
+
+# ----------------------------------
+# 环境变量和密钥（⚠️ 安全：不上传敏感信息）
+# ----------------------------------
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+*.p12
+secrets/
+credentials/
+config.local.yaml
+config.local.json
+
+# ----------------------------------
+# API 和服务
+# ----------------------------------
+*.pid
+*.seed
+*.pid.lock
+
+# ----------------------------------
+# 临时文件
+# ----------------------------------
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.cache
+.cache/
+
+# ----------------------------------
+# 系统特定文件
+# ----------------------------------
+Thumbs.db
+Desktop.ini
+.Spotlight-V100
+.Trashes
+._*
+
+# ----------------------------------
+# 文档构建
+# ----------------------------------
+docs/_build/
+docs/.doctrees/
+site/
+
+# ----------------------------------
+# 其他
+# ----------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.rar
+*.7z
+my_verl/
+system_for_test/
+
+# ----------------------------------
+# 保留重要文件（显式不忽略）
+# ----------------------------------
+!README.md
+!requirements*.txt
+!setup.sh
+!.gitignore
+!.gitattributes
+!LICENSE
