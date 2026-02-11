@@ -152,7 +152,7 @@ system_prompt: |
   请始终遵循以上规范，为用户提供专业、可靠且安全的医疗健康信息。
   
 judge_model:
-  api_key: sk-6c8517e0c78448019adb10c60c21f406
+  api_key: 
   base_url: https://api.deepseek.com/v1
   model: deepseek-chat
   batch_size: 64
