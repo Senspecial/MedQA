@@ -144,7 +144,7 @@ evaluation_metrics:
   calculate_rouge: false
   use_judge_model: true
   judge_model:
-    api_key: sk-6c8517e0c78448019adb10c60c21f406
+    api_key: 
     base_url: https://api.deepseek.com/v1
     batch_size: 5
     max_workers: 1
