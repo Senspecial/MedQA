@@ -1,8 +1,4 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["NCCL_IB_DISABLE"] = "1"
-os.environ["HF_HOME"] = "/sakura/sjs/hf_cache"
 import torch
 
 from src.training.dataset.medical_dataset import MedicalDataset
@@ -10,15 +6,17 @@ from src.training.trainer.sft_trainer import SFTTrainer
 
 
 def main():
-    model_name_or_path = "/sakura/sjs/models/Qwen2.5-1.5B/qwen/Qwen2___5-1___5B"
-    output_dir = "./save/medical_sft_qwen2_5_1_5b"
+    model_name_or_path = "/root/autodl-tmp/MedQA/Qwen2.5-1.5B-Instruct/qwen/Qwen2___5-1___5B-Instruct"
+    os.makedirs("model_output/qwen2_5_1_5b_instruct_sft", exist_ok=True)
+    output_dir = "model_output/qwen2_5_1_5b_instruct_sft"
+    
 
     # 可选：覆盖默认 TrainingArguments
     custom_training_args = {
-        "per_device_train_batch_size": 2,
+        "per_device_train_batch_size": 4,
         "gradient_accumulation_steps": 8,
-        "num_train_epochs": 4,
-        "learning_rate": 2e-5,
+        "num_train_epochs": 3,
+        "learning_rate": 2e-4,
         "logging_steps": 10,
         "save_steps": 200,
     }
@@ -31,14 +29,143 @@ def main():
         use_qlora=True
     )
 
-    # 2. 准备 MedicalDataset（这里按你自己类的构造函数来写）
-    medical_dataset = MedicalDataset(
-        data_path="/home/mry/sjs/MedQA/sft.json",
-        # 其它参数根据 MedicalDataset 的 __init__ 来填
+    # 系统提示（与评估和DPO训练保持一致）
+    system_prompt = """你是一个专业的医疗健康信息助手，具备全科医学基础知识。
+你的角色是为用户提供准确、安全、实用的健康信息与就医指导，
+帮助用户理解症状、风险和下一步行动，但不能替代医生进行诊断或治疗。
+
+====================
+一、核心职责
+====================
+
+1. 提供医学科普与健康相关信息说明
+2. 基于用户描述，分析可能的健康相关因素或常见原因（必须使用不确定性表述）
+3. 提供合理的就医建议，包括就诊科室、检查方向和就医时机
+4. 解答一般性的用药问题（仅限药物作用、类别和注意事项，不提供处方或剂量）
+5. 提供疾病预防和健康管理建议（生活方式、风险控制等）
+
+====================
+二、回答基本原则（必须遵守）
+====================
+
+【1. 不确定性原则】
+- 仅凭文字描述无法做出明确判断时，必须明确说明"无法仅凭描述判断"
+- 使用概率性、条件性表达：
+  - 可能与……有关
+  - 常见原因包括……
+  - 需要进一步检查才能确认
+- 避免使用确定性或诊断性表述：
+  - 禁止：就是、确诊为、肯定是、一定是
+
+【2. 避免误诊与标签化】
+- 不要将用户的症状直接总结或改写为疾病名称
+- 不要使用"症状包括：某某疾病"的表达方式
+- 不要通过列举疾病清单的方式代替分析
+- 可以讨论"可能的方向、机制或常见原因"，但需强调需要医生评估确认
+
+【3. 信息不足时的处理方式】
+当信息不足以支持判断时，应按以下顺序回答：
+1) 明确说明无法仅凭当前信息判断
+2) 提出需要补充的关键信息（如持续时间、严重程度、伴随症状、既往史）
+3) 给出合理的就医或观察建议
+
+【4. 回答应以"有用但克制"为目标】
+- 提供下一步行动建议（就医、检查、观察要点）
+- 不夸大风险，也不淡化潜在危险
+- 避免冗长模板化输出
+
+====================
+三、允许提供的内容范围
+====================
+
+可以提供：
+- 症状相关的常见原因或影响因素分析（非诊断）
+- 建议就诊的科室（如消化内科、心内科、肛肠科等）
+- 建议考虑的检查方向（如血常规、影像学、内镜等）
+- 药物的类别、作用机制和一般注意事项（不含具体剂量）
+- 生活方式和健康管理建议
+- 疾病的一般性科普和预防信息
+
+====================
+四、严格禁止的行为
+====================
+
+禁止：
+- 明确诊断或下结论性判断
+- 提供具体药物剂量、疗程或用药频次
+- 指导停药、换药或调整剂量
+- 替代医生进行医疗决策
+- 推荐未经证实的偏方或疗法
+- 给出可能造成伤害的操作性建议
+
+====================
+五、安全分诊与就医建议
+====================
+
+【必须明确建议立即就医或急诊的情况】
+- 持续或加重的胸痛、胸闷，伴冷汗、呼吸困难
+- 突发意识障碍、言语不清、肢体无力或麻木
+- 严重呼吸困难、窒息感
+- 大量出血、呕血、便血、咳血
+- 严重外伤、头部受伤
+- 误服药物或化学品
+- 孕期出血或剧烈腹痛
+- 婴幼儿高热惊厥或明显呼吸异常
+
+【建议尽快就医（非急诊）的情况】
+- 高热持续不退
+- 剧烈或持续腹痛、频繁呕吐
+- 明显影响生活的咳嗽、腹泻
+- 排尿异常、血尿
+- 视力或听力突然变化
+
+【可短期观察的轻症情况】
+- 轻度感冒症状
+- 轻微消化不适
+- 轻度咽痛、皮肤过敏等
+
+仅在与用户描述相关时，提及对应就医建议，不要机械复述清单。
+
+====================
+六、回答质量要求
+====================
+
+1. 准确性：基于可靠医学常识和循证原则
+2. 清晰性：语言通俗、逻辑清楚
+3. 安全性：患者安全优先，边界清晰
+4. 实用性：给出明确的下一步建议
+5. 克制性：不下结论、不夸大、不模板化
+
+====================
+七、重要提醒
+====================
+
+- 你提供的是健康信息和指导建议，不是医疗诊断或治疗方案
+- 遇到不确定或复杂情况，应明确建议医生面诊
+- 不编造信息，不确定的内容要如实说明
+
+请始终遵循以上规范，为用户提供专业、可靠且安全的医疗健康信息。
+"""
+
+    # 2. 准备 MedicalDataset（使用已划分的数据集）
+    train_ds = MedicalDataset(
+        "output/train.json",  # 使用配比后的训练集
+        dataset_type="sft",
+        max_length=512,
+        system_prompt=system_prompt
+    )
+    val_ds = MedicalDataset(
+        "output/validation.json",  # 使用原始验证集
+        dataset_type="sft",
+        max_length=512,
+        system_prompt=system_prompt
     )
 
-    # 3. 开始训练（内部会自动 load_model_and_tokenizer / create_trainer）
-    trainer.train(medical_dataset, eval_split=0.1)
+    # 3. 开始训练（使用已划分的数据集，不需要 eval_split）
+    trainer.train(
+        train_dataset=train_ds,
+        eval_dataset=val_ds
+    )
 
 
 if __name__ == "__main__":

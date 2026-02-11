@@ -3,7 +3,7 @@ from modelscope import snapshot_download
 
 # 定义模型保存路径
 #model_05b_path = "/sakura/sjs/models/Qwen2.5-0.5B"
-model_15b_path = "/sakura/sjs/models/Qwen2.5-1.5B-Instruct"
+model_15b_path = "/root/autodl-tmp/MedQA/Qwen2.5-1.5B-Instruct"
 
 # 自动创建目录（exist_ok=True 表示如果目录已存在也不报错）
 #os.makedirs(model_05b_path, exist_ok=True)
@@ -24,4 +24,4 @@ snapshot_download(
 )
 
 print("✅ Qwen2.5-1.5B-Instruct 下载完成！")
-print("🎉 所有模型已保存至 /sakura/sjs/models/ 目录。")
+print("🎉 所有模型已保存至 /root/autodl-tmp/MedQA/ 目录。")

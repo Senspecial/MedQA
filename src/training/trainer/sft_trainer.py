@@ -172,28 +172,70 @@ class SFTTrainer:
             args=training_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=self.tokenizer,
+            # 注意: 数据集已经 tokenized，不需要传入 tokenizer
+            # tokenizer=self.tokenizer,  # 移除这行
             data_collator=data_collator,
         )
         
         return self.trainer
     
-    def train(self, medical_dataset: MedicalDataset, eval_split: float = 0.1):
-        """执行SFT训练"""
+    def train(
+        self, 
+        train_dataset: Union[MedicalDataset, Dataset] = None,
+        eval_dataset: Union[MedicalDataset, Dataset] = None,
+        medical_dataset: MedicalDataset = None,
+        eval_split: float = 0.1
+    ):
+        """
+        执行SFT训练
+        
+        Args:
+            train_dataset: 训练数据集（如果已划分）
+            eval_dataset: 验证数据集（如果已划分）
+            medical_dataset: 完整医疗数据集（如果需要自动划分）
+            eval_split: 自动划分时的验证集比例
+        
+        说明:
+            优先使用 train_dataset 和 eval_dataset（已划分的数据）
+            如果没有提供，则使用 medical_dataset 并自动划分
+        """
         if self.model is None or self.tokenizer is None:
             self.load_model_and_tokenizer()
         
-        # 准备数据集
-        dataset = medical_dataset.get_sft_dataset(self.tokenizer)
+        # 情况1: 使用已划分的数据集（推荐）
+        if train_dataset is not None:
+            logger.info("Using pre-split datasets")
+            
+            # 如果传入的是 MedicalDataset，需要转换
+            if isinstance(train_dataset, MedicalDataset):
+                train_dataset = train_dataset.get_sft_dataset(self.tokenizer)
+            
+            if eval_dataset is not None and isinstance(eval_dataset, MedicalDataset):
+                eval_dataset = eval_dataset.get_sft_dataset(self.tokenizer)
+            
+            logger.info(f"Train dataset size: {len(train_dataset)}")
+            if eval_dataset:
+                logger.info(f"Eval dataset size: {len(eval_dataset)}")
         
-        # 划分训练和评估数据集
-        if eval_split > 0:
-            dataset = dataset.train_test_split(test_size=eval_split)
-            train_dataset = dataset["train"]
-            eval_dataset = dataset["test"]
+        # 情况2: 使用完整数据集并自动划分（旧方式，保持向后兼容）
+        elif medical_dataset is not None:
+            logger.info("Using full dataset with automatic split")
+            logger.warning("⚠️  建议使用已划分的数据集，避免测试集数据泄露")
+            
+            # 准备数据集
+            dataset = medical_dataset.get_sft_dataset(self.tokenizer)
+            
+            # 划分训练和评估数据集
+            if eval_split > 0:
+                dataset = dataset.train_test_split(test_size=eval_split, seed=42)
+                train_dataset = dataset["train"]
+                eval_dataset = dataset["test"]
+            else:
+                train_dataset = dataset
+                eval_dataset = None
+        
         else:
-            train_dataset = dataset
-            eval_dataset = None
+            raise ValueError("必须提供 train_dataset 或 medical_dataset")
         
         # 创建训练器
         self.create_trainer(train_dataset, eval_dataset)

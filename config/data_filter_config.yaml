@@ -1,0 +1,50 @@
+# 数据处理与过滤配置文件
+
+# 基本配置
+data_file: "/root/autodl-tmp/MedQA/merged_data.json"  # 单个数据文件
+# 或者使用 data_dir 指定包含数据文件的目录
+# data_dir: "/root/autodl-tmp/MedQA/data/raw"
+output_dir: "/root/autodl-tmp/MedQA/output/dataset"
+max_workers: 4
+
+# DeepSeek API配置
+deepseek:
+  api_key: "sk-6c8517e0c78448019adb10c60c21f406"  # 从环境变量读取：export DEEPSEEK_API_KEY=xxx
+  base_url: "https://api.deepseek.com/v1"
+  enable_annotation: true  # 是否启用标注
+  batch_size: 50  # 批次大小
+  max_workers: 4  # API并发数
+
+# 隐私过滤配置
+privacy_filter:
+  enabled: true  # 是否启用隐私过滤
+  mask_char: "***"  # 替换字符
+  strict_mode: false  # 严格模式：检测到隐私信息直接丢弃样本（改为小写false）
+
+# 质量过滤配置
+quality_filter:
+  enabled: true  # 是否启用质量过滤
+  
+  # 评分阈值（0-10分）
+  thresholds:
+    safety: 6.0  # 安全性最低分
+    relevance: 7.0  # 相关性最低分
+    authenticity: 6.0  # 真实性最低分
+    uncertainty_max: 7.0  # 不确定性最高分（越低越好）
+    helpfulness: 6.0  # 帮助性最低分
+    overall: 6.5  # 总体平均分最低分
+
+# 一级标签定义
+primary_labels:
+  - "医学科普"
+  - "疾病机制"
+  - "检查解释"
+  - "症状咨询"
+  - "药物信息"
+  - "通用寒暄"
+  - "其他"
+
+# 输出格式配置
+output:
+  save_csv: false
+  save_json: true

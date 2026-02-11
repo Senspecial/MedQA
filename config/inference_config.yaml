@@ -1,0 +1,124 @@
+# 医疗QA模型推理配置文件
+
+# ================================================================================
+# 模型配置
+# ================================================================================
+model:
+  # 模型路径（可以是完整模型或LoRA适配器路径）
+  model_path: "model_output/qwen2_5_1_5b_instruct_sft_merged"
+  
+  # 基础模型路径（仅当is_lora=true时需要）
+  base_model_path: "Qwen2.5-1.5B-Instruct/qwen/Qwen2___5-1___5B-Instruct"
+  
+  # 是否是LoRA模型
+  is_lora: false
+  
+  # 是否合并LoRA权重（推荐true以加速推理）
+  merge_lora: true
+  
+  # 设备选择
+  device: "cuda"  # cuda / cpu
+  
+  # 量化选项（节省显存）
+  load_in_8bit: false  # 8bit量化
+  load_in_4bit: false  # 4bit量化（更省显存）
+
+# ================================================================================
+# 生成参数
+# ================================================================================
+generation:
+  # 最大生成token数
+  max_new_tokens: 512
+  
+  # 温度（0.0-2.0，越高越随机）
+  temperature: 0.7
+  
+  # Top-p (nucleus sampling)
+  top_p: 0.9
+  
+  # Top-k sampling
+  top_k: 50
+  
+  # 重复惩罚（1.0-2.0，越高越避免重复）
+  repetition_penalty: 1.0
+  
+  # 是否采样（false时使用贪婪解码）
+  do_sample: true
+
+# ================================================================================
+# 系统提示
+# ================================================================================
+# 如果为null，将自动从 config/system_prompt.yaml 加载
+# 也可以在这里直接指定系统提示内容
+system_prompt: null
+
+# ================================================================================
+# 推理模式配置
+# ================================================================================
+inference:
+  # 推理模式：interactive / single / batch
+  mode: "interactive"
+  
+  # 单问题模式配置
+  single:
+    question: "我最近头痛，应该怎么办？"
+  
+  # 批量推理配置
+  batch:
+    # 输入文件路径（JSON格式）
+    input_file: "output/test.json"
+    
+    # 输出文件路径
+    output_file: "output/inference_results.json"
+    
+    # 批次大小
+    batch_size: 4
+    
+    # 最大处理样本数（null表示全部）
+    max_samples: null
+
+# ================================================================================
+# 输出配置
+# ================================================================================
+output:
+  # 是否显示详细信息
+  verbose: true
+  
+  # 是否保存推理日志
+  save_log: false
+  
+  # 日志文件路径
+  log_file: "output/inference.log"
+
+# ================================================================================
+# 使用示例
+# ================================================================================
+# 
+# 1. 使用配置文件运行交互式推理:
+#    python src/inference/run_inference_with_config.py --config config/inference_config.yaml
+#
+# 2. 单问题推理:
+#    修改 inference.mode 为 "single"
+#    设置 inference.single.question
+#
+# 3. 批量推理:
+#    修改 inference.mode 为 "batch"
+#    设置 inference.batch.input_file 和 output_file
+#
+# 4. SFT LoRA模型推理:
+#    model:
+#      model_path: "model_output/qwen2_5_1_5b_instruct_sft"
+#      base_model_path: "Qwen2.5-1.5B-Instruct/qwen/Qwen2___5-1___5B-Instruct"
+#      is_lora: true
+#      merge_lora: true
+#
+# 5. DPO模型推理:
+#    model:
+#      model_path: "model_output/qwen2_5_1_5b_dpo_merged"
+#      is_lora: false
+#
+# 6. 节省显存（量化）:
+#    model:
+#      load_in_8bit: true  # 或 load_in_4bit: true
+#
+# ================================================================================
