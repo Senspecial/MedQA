@@ -9,7 +9,7 @@ max_workers: 4
 
 # DeepSeek API配置
 deepseek:
-  api_key: "sk-6c8517e0c78448019adb10c60c21f406"  # 从环境变量读取：export DEEPSEEK_API_KEY=xxx
+  api_key: ""  # 从环境变量读取：export DEEPSEEK_API_KEY=xxx
   base_url: "https://api.deepseek.com/v1"
   enable_annotation: true  # 是否启用标注
   batch_size: 50  # 批次大小
