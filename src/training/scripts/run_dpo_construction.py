@@ -29,10 +29,18 @@ sys.path.insert(0, str(project_root))
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from peft import PeftModel
 from src.training.dataset.dpo_negative_constructor import (
-    ResponseCandidate, 
-    DPOSample, 
+    ResponseCandidate,
+    DPOSample,
     JudgeModel
 )
+
+# 尝试导入 vLLM
+try:
+    from vllm import LLM, SamplingParams
+    from vllm.lora.request import LoRARequest
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
 
 import logging
 
@@ -128,6 +136,87 @@ def load_sft_model(model_config: Dict, project_root: Path):
     return model, tokenizer
 
 
+def load_sft_model_vllm(
+    model_config: Dict, vllm_config: Dict, project_root: Path
+):
+    """
+    使用 vLLM 加载 SFT 模型，支持完整模型和 LoRA 适配器两种形式。
+
+    - 完整模型（is_lora=False）：直接加载
+    - LoRA 模型（is_lora=True）：加载 base model 并启用 enable_lora，
+      返回 LoRARequest 供生成时使用
+
+    Returns:
+        (engine, tokenizer, lora_request_or_None)
+    """
+    if not VLLM_AVAILABLE:
+        raise ImportError("vLLM 未安装，请执行: pip install vllm")
+
+    is_lora = model_config.get('is_lora', False)
+
+    # 解析路径
+    model_path = model_config['model_path']
+    if not os.path.isabs(model_path):
+        model_path = os.path.join(project_root, model_path)
+
+    if is_lora:
+        base_model_path = model_config.get('base_model_path', '')
+        if not os.path.isabs(base_model_path):
+            base_model_path = os.path.join(project_root, base_model_path)
+        load_path = base_model_path  # vLLM 加载 base model
+        lora_path = model_path       # LoRA 适配器路径
+        logger.info(f"vLLM LoRA 模式 — base model: {base_model_path}")
+        logger.info(f"              LoRA adapter: {lora_path}")
+    else:
+        load_path = model_path
+        lora_path = None
+        logger.info(f"使用 vLLM 加载完整模型: {load_path}")
+
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    tensor_parallel_size = vllm_config.get('tensor_parallel_size', 1)
+    if gpu_count < tensor_parallel_size:
+        logger.warning(f"可用GPU数({gpu_count}) < 请求并行数({tensor_parallel_size})，已自动调整")
+        tensor_parallel_size = max(1, gpu_count)
+
+    engine = LLM(
+        model=load_path,
+        dtype=vllm_config.get('dtype', 'auto'),
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=vllm_config.get('gpu_memory_utilization', 0.9),
+        max_model_len=vllm_config.get('max_model_len', 4096),
+        trust_remote_code=True,
+        enable_lora=is_lora,
+        max_lora_rank=vllm_config.get('max_lora_rank', 64),
+    )
+    tokenizer = engine.get_tokenizer()
+
+    lora_request = None
+    if is_lora:
+        lora_request = LoRARequest("sft_adapter", 1, lora_path)
+        logger.info("✓ vLLM 引擎 + LoRA 适配器加载完成")
+    else:
+        logger.info("✓ vLLM 模型加载完成")
+
+    return engine, tokenizer, lora_request
+
+
+def _build_prompt(tokenizer, system_prompt: str, question: str) -> str:
+    """构建带 chat template 的 prompt 字符串"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": question},
+    ]
+    if hasattr(tokenizer, "apply_chat_template"):
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+    return (
+        f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+        f"<|im_start|>user\n{question}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+
+
 def generate_responses(
     model,
     tokenizer,
@@ -136,21 +225,14 @@ def generate_responses(
     gen_config: Dict,
     device: str
 ) -> List[Tuple[str, Dict]]:
-    """生成多个候选回答"""
+    """使用 HuggingFace Transformers 逐策略生成候选回答"""
     strategies = gen_config['strategies']
     responses = []
-    
+
+    text = _build_prompt(tokenizer, system_prompt, question)
+    inputs = tokenizer(text, return_tensors="pt").to(device)
+
     for strategy in strategies:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
-        ]
-        
-        # 构造输入
-        text = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
-        
-        inputs = tokenizer(text, return_tensors="pt").to(device)
-        
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -162,13 +244,70 @@ def generate_responses(
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
-        
         generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
         response = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-        
         responses.append((response, strategy))
-    
+
     return responses
+
+
+def batch_generate_responses_vllm(
+    engine,
+    tokenizer,
+    questions: List[str],
+    system_prompt: str,
+    gen_config: Dict,
+    lora_request=None,
+) -> List[List[Tuple[str, Dict]]]:
+    """
+    使用 vLLM 批量生成所有问题的候选回答。
+
+    按策略分组提交（K 次批量请求，每次 N 条），保证同批采样参数一致，
+    充分利用 vLLM 的连续批处理和 PagedAttention 能力。
+
+    Args:
+        engine: vLLM LLM 引擎实例
+        tokenizer: 对应的 tokenizer
+        questions: 问题列表（长度 N）
+        system_prompt: 系统提示词
+        gen_config: generation 配置字典
+        lora_request: LoRARequest 实例（LoRA 模型时传入，否则为 None）
+
+    Returns:
+        长度为 N 的列表，每个元素是该问题的候选列表 [(response, strategy), ...]
+    """
+    strategies = gen_config['strategies']
+    max_new_tokens = gen_config['max_new_tokens']
+    repetition_penalty = gen_config.get('repetition_penalty', 1.1)
+
+    # 每个问题构建一次 prompt（所有策略共用同一 prompt 文本）
+    prompts = [_build_prompt(tokenizer, system_prompt, q) for q in questions]
+
+    logger.info(
+        f"vLLM 批量生成: {len(questions)} 个问题 × {len(strategies)} 个策略 "
+        f"= {len(questions) * len(strategies)} 条请求"
+        + (" [LoRA 模式]" if lora_request else "")
+    )
+
+    results: List[List[Tuple[str, Dict]]] = [[] for _ in questions]
+
+    for strategy in strategies:
+        do_sample = strategy.get('do_sample', True)
+        sp = SamplingParams(
+            max_tokens=max_new_tokens,
+            temperature=strategy['temperature'] if do_sample else 0.0,
+            top_p=strategy['top_p'] if do_sample else 1.0,
+            repetition_penalty=repetition_penalty,
+            stop=["<|im_end|>"],
+        )
+        # 批量生成（可选传入 lora_request）
+        generate_kwargs = {"lora_request": lora_request} if lora_request else {}
+        outputs = engine.generate(prompts, sp, **generate_kwargs)
+        for q_idx, output in enumerate(outputs):
+            response = output.outputs[0].text.strip()
+            results[q_idx].append((response, strategy))
+
+    return results
 
 
 def evaluate_responses(
@@ -402,10 +541,23 @@ def construct_dpo_data(config_path: str):
     else:
         input_samples = input_data
     
-    # 2. 加载SFT模型
+    # 2. 加载SFT模型（vLLM 或 HuggingFace）
+    vllm_config = config.get('vllm', {})
+    use_vllm = vllm_config.get('enabled', False)
     device = sft_model_config['device']
-    model, tokenizer = load_sft_model(sft_model_config, project_root)
-    
+
+    if use_vllm:
+        logger.info("\n🚀 使用 vLLM 推理后端加载模型...")
+        engine, tokenizer, lora_request = load_sft_model_vllm(
+            sft_model_config, vllm_config, project_root
+        )
+        model = None  # vLLM 路径不使用 HuggingFace model 对象
+    else:
+        logger.info("\n📥 使用 HuggingFace Transformers 加载模型...")
+        model, tokenizer = load_sft_model(sft_model_config, project_root)
+        engine = None
+        lora_request = None
+
     # 3. 初始化评审模型
     logger.info(f"\n🔍 初始化评审模型...")
     api_key = os.environ.get('DEEPSEEK_API_KEY') or judge_config.get('api_key', '')
@@ -424,92 +576,161 @@ def construct_dpo_data(config_path: str):
     # 4. 构造DPO样本
     logger.info(f"\n🔧 开始构造DPO样本...")
     system_prompt = config.get('system_prompt', '你是一个专业的医疗助手。')
-    
+
     dpo_samples = []
     stats = GenerationStats()
     stats.total_samples = len(input_samples)
-    
+
     all_candidates_data = []  # 保存所有候选回答（用于分析）
-    
-    for idx, sample in enumerate(tqdm(input_samples, desc="构造DPO样本")):
+
+    # 提取有效问题列表（过滤空问题）
+    valid_samples = []
+    for idx, sample in enumerate(input_samples):
         question = sample.get('question') or sample.get('query') or sample.get('instruction') or ""
-        
-        if not question:
+        if question:
+            valid_samples.append((idx, sample, question))
+        else:
             stats.skipped_samples += 1
-            continue
-        
-        try:
-            # 生成候选回答
-            responses = generate_responses(
-                model, tokenizer, question, system_prompt, gen_config, device
-            )
-            
-            # 评估候选回答
-            candidates = evaluate_responses(judge_model, question, responses)
-            
-            if not candidates:
+
+    # ── vLLM 路径：一次性批量生成所有问题的所有候选 ──────────────────────────
+    if use_vllm:
+        logger.info(f"vLLM 批量生成模式：共 {len(valid_samples)} 个问题")
+        all_questions = [q for _, _, q in valid_samples]
+        all_responses_batch = batch_generate_responses_vllm(
+            engine, tokenizer, all_questions, system_prompt, gen_config,
+            lora_request=lora_request,
+        )
+        # all_responses_batch[i] = [(response, strategy), ...] for valid_samples[i]
+
+        for batch_idx, (orig_idx, sample, question) in enumerate(
+            tqdm(valid_samples, desc="评估与选择DPO样本")
+        ):
+            try:
+                responses = all_responses_batch[batch_idx]
+                candidates = evaluate_responses(judge_model, question, responses)
+
+                if not candidates:
+                    stats.skipped_samples += 1
+                    continue
+
+                stats.generated_samples += 1
+                stats.avg_candidates_per_sample += len(candidates)
+
+                if output_config.get('save_all_candidates', True):
+                    all_candidates_data.append({
+                        'question': question,
+                        'candidates': [asdict(c) for c in candidates],
+                        'sample_id': sample.get('id', f'sample_{orig_idx}')
+                    })
+
+                pair = select_dpo_pair(candidates, selection_config)
+                if pair is None:
+                    stats.invalid_pairs += 1
+                    continue
+
+                chosen, rejected = pair
+                stats.valid_pairs += 1
+                stats.avg_score_difference += (chosen.quality_score - rejected.quality_score)
+
+                dpo_samples.append(DPOSample(
+                    prompt=question,
+                    chosen=chosen.response,
+                    rejected=rejected.response,
+                    chosen_score=chosen.score,
+                    rejected_score=rejected.score,
+                    metadata={
+                        'source_id': sample.get('id', f'sample_{orig_idx}'),
+                        'chosen_strategy': chosen.details.get('strategy'),
+                        'rejected_strategy': rejected.details.get('strategy'),
+                        'score_difference': chosen.quality_score - rejected.quality_score,
+                        'num_candidates': len(candidates),
+                        'chosen_scores': {
+                            'overall': chosen.score,
+                            'hallucination': chosen.hallucination_score,
+                            'overreach': chosen.overreach_score,
+                            'quality': chosen.quality_score,
+                            'readability': chosen.readability_score
+                        },
+                        'rejected_scores': {
+                            'overall': rejected.score,
+                            'hallucination': rejected.hallucination_score,
+                            'overreach': rejected.overreach_score,
+                            'quality': rejected.quality_score,
+                            'readability': rejected.readability_score
+                        }
+                    }
+                ))
+
+            except Exception as e:
+                logger.warning(f"处理样本 {orig_idx} 失败: {e}")
                 stats.skipped_samples += 1
                 continue
-            
-            stats.generated_samples += 1
-            stats.avg_candidates_per_sample += len(candidates)
-            
-            # 保存所有候选（如果需要）
-            if output_config.get('save_all_candidates', True):
-                all_candidates_data.append({
-                    'question': question,
-                    'candidates': [asdict(c) for c in candidates],
-                    'sample_id': sample.get('id', f'sample_{idx}')
-                })
-            
-            # 选择chosen和rejected对
-            pair = select_dpo_pair(candidates, selection_config)
-            
-            if pair is None:
-                stats.invalid_pairs += 1
-                continue
-            
-            chosen, rejected = pair
-            stats.valid_pairs += 1
-            stats.avg_score_difference += (chosen.quality_score - rejected.quality_score)
-            
-            # 创建DPO样本
-            dpo_sample = DPOSample(
-                prompt=question,
-                chosen=chosen.response,
-                rejected=rejected.response,
-                chosen_score=chosen.score,  # 使用综合得分
-                rejected_score=rejected.score,  # 使用综合得分
-                metadata={
-                    'source_id': sample.get('id', f'sample_{idx}'),
-                    'chosen_strategy': chosen.details.get('strategy'),
-                    'rejected_strategy': rejected.details.get('strategy'),
-                    'score_difference': chosen.quality_score - rejected.quality_score,
-                    'num_candidates': len(candidates),
-                    # 详细分数存在metadata中
-                    'chosen_scores': {
-                        'overall': chosen.score,
-                        'hallucination': chosen.hallucination_score,
-                        'overreach': chosen.overreach_score,
-                        'quality': chosen.quality_score,
-                        'readability': chosen.readability_score
-                    },
-                    'rejected_scores': {
-                        'overall': rejected.score,
-                        'hallucination': rejected.hallucination_score,
-                        'overreach': rejected.overreach_score,
-                        'quality': rejected.quality_score,
-                        'readability': rejected.readability_score
+
+    # ── HuggingFace 路径：逐样本顺序生成 ──────────────────────────────────────
+    else:
+        for orig_idx, sample, question in tqdm(valid_samples, desc="构造DPO样本"):
+            try:
+                responses = generate_responses(
+                    model, tokenizer, question, system_prompt, gen_config, device
+                )
+                candidates = evaluate_responses(judge_model, question, responses)
+
+                if not candidates:
+                    stats.skipped_samples += 1
+                    continue
+
+                stats.generated_samples += 1
+                stats.avg_candidates_per_sample += len(candidates)
+
+                if output_config.get('save_all_candidates', True):
+                    all_candidates_data.append({
+                        'question': question,
+                        'candidates': [asdict(c) for c in candidates],
+                        'sample_id': sample.get('id', f'sample_{orig_idx}')
+                    })
+
+                pair = select_dpo_pair(candidates, selection_config)
+                if pair is None:
+                    stats.invalid_pairs += 1
+                    continue
+
+                chosen, rejected = pair
+                stats.valid_pairs += 1
+                stats.avg_score_difference += (chosen.quality_score - rejected.quality_score)
+
+                dpo_samples.append(DPOSample(
+                    prompt=question,
+                    chosen=chosen.response,
+                    rejected=rejected.response,
+                    chosen_score=chosen.score,
+                    rejected_score=rejected.score,
+                    metadata={
+                        'source_id': sample.get('id', f'sample_{orig_idx}'),
+                        'chosen_strategy': chosen.details.get('strategy'),
+                        'rejected_strategy': rejected.details.get('strategy'),
+                        'score_difference': chosen.quality_score - rejected.quality_score,
+                        'num_candidates': len(candidates),
+                        'chosen_scores': {
+                            'overall': chosen.score,
+                            'hallucination': chosen.hallucination_score,
+                            'overreach': chosen.overreach_score,
+                            'quality': chosen.quality_score,
+                            'readability': chosen.readability_score
+                        },
+                        'rejected_scores': {
+                            'overall': rejected.score,
+                            'hallucination': rejected.hallucination_score,
+                            'overreach': rejected.overreach_score,
+                            'quality': rejected.quality_score,
+                            'readability': rejected.readability_score
+                        }
                     }
-                }
-            )
-            
-            dpo_samples.append(dpo_sample)
-            
-        except Exception as e:
-            logger.warning(f"处理样本 {idx} 失败: {e}")
-            stats.skipped_samples += 1
-            continue
+                ))
+
+            except Exception as e:
+                logger.warning(f"处理样本 {orig_idx} 失败: {e}")
+                stats.skipped_samples += 1
+                continue
     
     # 计算平均值
     if stats.generated_samples > 0:

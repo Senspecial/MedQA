@@ -1,11 +1,25 @@
+# ================================================================================
+# vLLM 推理后端配置
+# ================================================================================
+# 启用后，候选回答生成阶段将使用 vLLM 进行批量推理，速度远快于逐条 HuggingFace 推理。
+# LoRA 模型（is_lora=true）将通过 vLLM enable_lora 机制加载，无需提前合并权重。
+vllm:
+  enabled: true                  # 启用 vLLM 批量生成
+  gpu_memory_utilization: 0.7    # GPU 显存占用比例（0.0-1.0）
+  tensor_parallel_size: 1        # 张量并行 GPU 数量
+  max_model_len: 2048            # 最大序列长度（prompt + 输出 token 总数上限）
+  dtype: "auto"                  # 数据类型：auto / float16 / bfloat16
+  # LoRA 相关（is_lora=true 时生效），须 >= 训练时使用的 lora_r
+  max_lora_rank: 64
+
 input_data:
   data_path: /root/autodl-tmp/MedQA/output/train.json
   num_samples: 500
   random_seed: 42
 sft_model:
   model_path: model_output/qwen2_5_1_5b_instruct_sft
-  base_model_path: Qwen2.5-1.5B-Instruct/qwen/Qwen2___5-1___5B-Instruct
-  is_lora: true
+  base_model_path: model_output/qwen2_5_1_5b_instruct_sft_merged
+  is_lora: false
   device: cuda
 generation:
   num_candidates: 5

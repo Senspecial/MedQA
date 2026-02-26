@@ -193,6 +193,12 @@ def main():
     print(f"\n推理模式: {mode}")
     print(f"模型路径: {model_config['model_path']}")
     
+    # 读取 vLLM 配置
+    vllm_config = config.get('vllm', {})
+    use_vllm = vllm_config.get('enabled', False)
+    if use_vllm:
+        print("vLLM 后端已启用（高吞吐量模式）")
+
     # 初始化推理器
     inferencer = MedicalQAInference(
         model_path=model_config['model_path'],
@@ -203,6 +209,11 @@ def main():
         device=model_config.get('device', 'cuda'),
         load_in_8bit=model_config.get('load_in_8bit', False),
         load_in_4bit=model_config.get('load_in_4bit', False),
+        use_vllm=use_vllm,
+        vllm_gpu_memory_utilization=vllm_config.get('gpu_memory_utilization', 0.9),
+        vllm_tensor_parallel_size=vllm_config.get('tensor_parallel_size', 1),
+        vllm_max_model_len=vllm_config.get('max_model_len', 4096),
+        vllm_dtype=vllm_config.get('dtype', 'auto'),
     )
     
     # 根据模式运行

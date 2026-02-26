@@ -4,6 +4,7 @@
 """
 医疗QA模型推理工具
 支持SFT和DPO模型的推理，支持LoRA模型加载和合并
+支持 HuggingFace Transformers 和 vLLM 两种推理后端
 """
 
 import os
@@ -22,6 +23,13 @@ sys.path.insert(0, str(project_root))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 from peft import PeftModel
+
+# 尝试导入 vLLM
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
 
 
 def load_system_prompt(config_path: str = "config/system_prompt.yaml") -> str:
@@ -61,7 +69,7 @@ def load_system_prompt(config_path: str = "config/system_prompt.yaml") -> str:
 
 
 class MedicalQAInference:
-    """医疗QA推理类"""
+    """医疗QA推理类，支持 HuggingFace Transformers 和 vLLM 两种后端"""
     
     def __init__(
         self,
@@ -73,24 +81,40 @@ class MedicalQAInference:
         device: str = "cuda",
         load_in_8bit: bool = False,
         load_in_4bit: bool = False,
+        use_vllm: bool = False,
+        vllm_gpu_memory_utilization: float = 0.9,
+        vllm_tensor_parallel_size: int = 1,
+        vllm_max_model_len: int = 4096,
+        vllm_dtype: str = "auto",
     ):
         """
         初始化推理器
-        
+
         Args:
             model_path: 模型路径（可以是完整模型或LoRA适配器）
             base_model_path: 基础模型路径（仅当is_lora=True时需要）
             is_lora: 是否是LoRA模型
             merge_lora: 是否合并LoRA权重（推荐True以加速推理）
             system_prompt: 系统提示（如果为None，从配置文件加载）
-            device: 设备（cuda/cpu）
-            load_in_8bit: 是否以8bit加载（节省显存）
-            load_in_4bit: 是否以4bit加载（更省显存）
+            device: 设备（cuda/cpu），仅对HuggingFace后端有效
+            load_in_8bit: 是否以8bit加载（节省显存），仅对HuggingFace后端有效
+            load_in_4bit: 是否以4bit加载（更省显存），仅对HuggingFace后端有效
+            use_vllm: 是否使用vLLM作为推理后端（高吞吐量场景推荐）
+            vllm_gpu_memory_utilization: vLLM GPU显存占用比例（0.0-1.0）
+            vllm_tensor_parallel_size: vLLM张量并行GPU数量
+            vllm_max_model_len: vLLM最大序列长度
+            vllm_dtype: vLLM数据类型（auto/float16/bfloat16）
         """
+        self.use_vllm = use_vllm
         self.device = device if torch.cuda.is_available() else "cpu"
         self.model_path = model_path
         self.is_lora = is_lora
-        
+
+        if use_vllm and not VLLM_AVAILABLE:
+            raise ImportError(
+                "use_vllm=True 但 vLLM 未安装，请执行: pip install vllm"
+            )
+
         # 加载系统提示
         if system_prompt is None:
             self.system_prompt = load_system_prompt()
@@ -98,19 +122,74 @@ class MedicalQAInference:
         else:
             self.system_prompt = system_prompt
             print("✓ 使用传入的系统提示")
-        
+
         print(f"\n{'='*60}")
         print("初始化医疗QA推理器")
         print(f"{'='*60}")
+        print(f"推理后端: {'vLLM' if use_vllm else 'HuggingFace Transformers'}")
         print(f"模型路径: {model_path}")
         print(f"是否LoRA: {is_lora}")
         if is_lora:
             print(f"基础模型: {base_model_path}")
             print(f"合并LoRA: {merge_lora}")
-        print(f"设备: {self.device}")
+        if not use_vllm:
+            print(f"设备: {self.device}")
         print(f"{'='*60}\n")
-        
-        # 加载tokenizer
+
+        if use_vllm:
+            self._init_vllm(
+                model_path=model_path,
+                dtype=vllm_dtype,
+                tensor_parallel_size=vllm_tensor_parallel_size,
+                gpu_memory_utilization=vllm_gpu_memory_utilization,
+                max_model_len=vllm_max_model_len,
+            )
+        else:
+            self._init_hf(
+                model_path=model_path,
+                base_model_path=base_model_path,
+                is_lora=is_lora,
+                merge_lora=merge_lora,
+                load_in_8bit=load_in_8bit,
+                load_in_4bit=load_in_4bit,
+            )
+
+    def _init_vllm(
+        self,
+        model_path: str,
+        dtype: str,
+        tensor_parallel_size: int,
+        gpu_memory_utilization: float,
+        max_model_len: int,
+    ):
+        """使用 vLLM 初始化推理引擎"""
+        print("📥 使用 vLLM 加载模型...")
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if gpu_count < tensor_parallel_size:
+            print(f"  警告: 可用GPU数({gpu_count}) < 请求并行数({tensor_parallel_size})，已自动调整")
+            tensor_parallel_size = max(1, gpu_count)
+
+        self.vllm_engine = LLM(
+            model=model_path,
+            dtype=dtype,
+            tensor_parallel_size=tensor_parallel_size,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            trust_remote_code=True,
+        )
+        self.tokenizer = self.vllm_engine.get_tokenizer()
+        print("✓ vLLM 模型加载完成\n")
+
+    def _init_hf(
+        self,
+        model_path: str,
+        base_model_path: Optional[str],
+        is_lora: bool,
+        merge_lora: bool,
+        load_in_8bit: bool,
+        load_in_4bit: bool,
+    ):
+        """使用 HuggingFace Transformers 初始化推理引擎"""
         print("📥 加载Tokenizer...")
         tokenizer_path = base_model_path if is_lora else model_path
         self.tokenizer = AutoTokenizer.from_pretrained(
@@ -118,58 +197,58 @@ class MedicalQAInference:
             trust_remote_code=True,
             padding_side='left'
         )
-        
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        
         print("✓ Tokenizer加载完成")
-        
-        # 加载模型
+
         print("\n📥 加载模型...")
-        
-        # 配置量化参数
         load_kwargs = {
             'trust_remote_code': True,
             'device_map': 'auto' if self.device == 'cuda' else None,
         }
-        
         if not (load_in_8bit or load_in_4bit):
             load_kwargs['torch_dtype'] = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        
         if load_in_8bit:
             load_kwargs['load_in_8bit'] = True
             print("  使用8bit量化加载")
         elif load_in_4bit:
             load_kwargs['load_in_4bit'] = True
             print("  使用4bit量化加载")
-        
+
         if is_lora:
-            # 加载基础模型 + LoRA适配器
             print(f"  加载基础模型: {base_model_path}")
-            base_model = AutoModelForCausalLM.from_pretrained(
-                base_model_path,
-                **load_kwargs
-            )
-            
+            base_model = AutoModelForCausalLM.from_pretrained(base_model_path, **load_kwargs)
             print(f"  加载LoRA适配器: {model_path}")
             model = PeftModel.from_pretrained(base_model, model_path)
-            
             if merge_lora:
                 print("  合并LoRA权重...")
                 model = model.merge_and_unload()
                 print("  ✓ LoRA权重已合并")
         else:
-            # 加载完整模型
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                **load_kwargs
-            )
-        
+            model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+
         model.eval()
         self.model = model
-        
         print("✓ 模型加载完成\n")
     
+    def _build_prompt(self, question: str) -> str:
+        """将问题构建为带 chat template 的完整 prompt 字符串"""
+        messages = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "user", "content": question},
+        ]
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        # 手动构建（Qwen 格式兜底）
+        text = f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n"
+        text += f"<|im_start|>user\n{question}<|im_end|>\n"
+        text += "<|im_start|>assistant\n"
+        return text
+
     def generate(
         self,
         question: str,
@@ -182,7 +261,7 @@ class MedicalQAInference:
     ) -> str:
         """
         生成单个问题的回答
-        
+
         Args:
             question: 问题
             max_new_tokens: 最大生成token数
@@ -191,33 +270,56 @@ class MedicalQAInference:
             top_k: top-k sampling
             repetition_penalty: 重复惩罚
             do_sample: 是否采样
-            
+
         Returns:
             生成的回答
         """
-        # 构建输入
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": question}
-        ]
-        
-        # 使用chat template
-        if hasattr(self.tokenizer, "apply_chat_template"):
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
+        if self.use_vllm:
+            return self._generate_vllm(
+                question, max_new_tokens, temperature, top_p, top_k,
+                repetition_penalty, do_sample
             )
-        else:
-            # 手动构建（Qwen格式）
-            text = f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n"
-            text += f"<|im_start|>user\n{question}<|im_end|>\n"
-            text += "<|im_start|>assistant\n"
-        
-        # Tokenize
+        return self._generate_hf(
+            question, max_new_tokens, temperature, top_p, top_k,
+            repetition_penalty, do_sample
+        )
+
+    def _generate_vllm(
+        self,
+        question: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        do_sample: bool,
+    ) -> str:
+        """使用 vLLM 生成回答"""
+        prompt = self._build_prompt(question)
+        sampling_params = SamplingParams(
+            max_tokens=max_new_tokens,
+            temperature=0.0 if not do_sample else temperature,
+            top_p=1.0 if not do_sample else top_p,
+            top_k=-1 if not do_sample else top_k,
+            repetition_penalty=repetition_penalty,
+            stop=["<|im_end|>"],
+        )
+        outputs = self.vllm_engine.generate(prompt, sampling_params)
+        return outputs[0].outputs[0].text.strip()
+
+    def _generate_hf(
+        self,
+        question: str,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        repetition_penalty: float,
+        do_sample: bool,
+    ) -> str:
+        """使用 HuggingFace Transformers 生成回答"""
+        text = self._build_prompt(question)
         inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        
-        # 生成
         with torch.no_grad():
             outputs = self.model.generate(
                 **inputs,
@@ -230,11 +332,8 @@ class MedicalQAInference:
                 pad_token_id=self.tokenizer.pad_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
             )
-        
-        # 解码
         generated_ids = outputs[0][inputs['input_ids'].shape[1]:]
         response = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        
         return response.strip()
     
     def batch_generate(
@@ -244,26 +343,57 @@ class MedicalQAInference:
         **generate_kwargs
     ) -> List[str]:
         """
-        批量生成回答
-        
+        批量生成回答。vLLM 后端会一次性提交所有 prompt，充分发挥并行吞吐优势；
+        HuggingFace 后端按 batch_size 分批顺序推理。
+
         Args:
             questions: 问题列表
-            batch_size: 批次大小
-            **generate_kwargs: 传递给generate的其他参数
-            
+            batch_size: 批次大小（仅对 HuggingFace 后端有效）
+            **generate_kwargs: 传递给 generate 的其他参数
+
         Returns:
             回答列表
         """
+        if self.use_vllm:
+            return self._batch_generate_vllm(questions, **generate_kwargs)
+        return self._batch_generate_hf(questions, batch_size, **generate_kwargs)
+
+    def _batch_generate_vllm(self, questions: List[str], **generate_kwargs) -> List[str]:
+        """vLLM 批量推理：一次提交全部 prompt"""
+        max_new_tokens = generate_kwargs.get("max_new_tokens", 512)
+        temperature = generate_kwargs.get("temperature", 0.7)
+        top_p = generate_kwargs.get("top_p", 0.9)
+        top_k = generate_kwargs.get("top_k", 50)
+        repetition_penalty = generate_kwargs.get("repetition_penalty", 1.0)
+        do_sample = generate_kwargs.get("do_sample", True)
+
+        prompts = [self._build_prompt(q) for q in questions]
+        sampling_params = SamplingParams(
+            max_tokens=max_new_tokens,
+            temperature=0.0 if not do_sample else temperature,
+            top_p=1.0 if not do_sample else top_p,
+            top_k=-1 if not do_sample else top_k,
+            repetition_penalty=repetition_penalty,
+            stop=["<|im_end|>"],
+        )
+        outputs = self.vllm_engine.generate(prompts, sampling_params)
+        return [output.outputs[0].text.strip() for output in outputs]
+
+    def _batch_generate_hf(
+        self,
+        questions: List[str],
+        batch_size: int,
+        **generate_kwargs
+    ) -> List[str]:
+        """HuggingFace 分批推理"""
         from tqdm import tqdm
-        
+
         answers = []
-        
         for i in tqdm(range(0, len(questions), batch_size), desc="批量推理"):
-            batch = questions[i:i+batch_size]
+            batch = questions[i:i + batch_size]
             for question in batch:
                 answer = self.generate(question, **generate_kwargs)
                 answers.append(answer)
-        
         return answers
     
     def interactive_chat(self):

@@ -5,66 +5,18 @@
 # ----------------------------------
 # 模型权重和检查点（⚠️ 重要：不上传大文件）
 # ----------------------------------
-save/
-*.bin
-*.safetensors
-*.pth
-*.pt
-*.ckpt
-*.h5
-*.pb
-*.onnx
-*.tflite
-model_cache/
-checkpoint-*/
-checkpoints/
-
-# ----------------------------------
-# 数据文件（避免上传大数据集）
-# ----------------------------------
-data/
-!data/.gitkeep
-crawled_data/
-processed_data/
-knowledge_base/
-embedding_cache/
-*.csv
-*.tsv
-*.jsonl
-*.parquet
-*.arrow
-*.feather
-
-# JSON 数据文件（训练数据、评估结果等）
-sft.json
-dpo.json
-rl_dataset.json
-eval_results.json
-sft_eval_results.json
-sft_grpo_eval_results.json
-*_eval_results.json
-*.dataset.json
-
-# 保留配置文件（小文件）
-!*config.json
-!*settings.json
-!package.json
-
-# 保留示例数据
-!data/examples/
-!data/test_samples/
-
-# ----------------------------------
-# 日志和输出
-# ----------------------------------
+docs/
 logs/
-*.log
+model_output/
 output/
-results/
-runs/
-wandb/
-tensorboard/
-mlruns/
+Qwen2.5-1.5B-Instruct/
+
+
+merged_data.json
+
+
+
+
 
 # ----------------------------------
 # Python 缓存和编译文件

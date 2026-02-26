@@ -16,12 +16,33 @@ model:
   # 是否合并LoRA权重（推荐true以加速推理）
   merge_lora: true
   
-  # 设备选择
+  # 设备选择（仅对 HuggingFace 后端有效）
   device: "cuda"  # cuda / cpu
   
-  # 量化选项（节省显存）
+  # 量化选项（节省显存，仅对 HuggingFace 后端有效）
   load_in_8bit: false  # 8bit量化
   load_in_4bit: false  # 4bit量化（更省显存）
+
+# ================================================================================
+# vLLM 推理后端配置
+# ================================================================================
+vllm:
+  # 是否启用 vLLM 推理后端（高吞吐量场景推荐，批量推理速度远超 HuggingFace）
+  # 注意: 需要先安装 vLLM: pip install vllm
+  # 注意: vLLM 不支持 LoRA 动态挂载，请使用已合并的完整模型
+  enabled: false
+
+  # GPU 显存占用比例（0.0-1.0），建议 0.85-0.95
+  gpu_memory_utilization: 0.9
+
+  # 张量并行 GPU 数量（多卡推理时设置，需与可用 GPU 数量一致）
+  tensor_parallel_size: 1
+
+  # 模型最大序列长度（prompt + 输出 token 总数上限）
+  max_model_len: 4096
+
+  # 数据类型：auto / float16 / bfloat16
+  dtype: "auto"
 
 # ================================================================================
 # 生成参数
@@ -94,7 +115,7 @@ output:
 # 使用示例
 # ================================================================================
 # 
-# 1. 使用配置文件运行交互式推理:
+# 1. 使用配置文件运行交互式推理（HuggingFace 后端）:
 #    python src/inference/run_inference_with_config.py --config config/inference_config.yaml
 #
 # 2. 单问题推理:
@@ -117,8 +138,15 @@ output:
 #      model_path: "model_output/qwen2_5_1_5b_dpo_merged"
 #      is_lora: false
 #
-# 6. 节省显存（量化）:
+# 6. 节省显存（HuggingFace 量化）:
 #    model:
 #      load_in_8bit: true  # 或 load_in_4bit: true
+#
+# 7. 启用 vLLM 高吞吐量推理（批量场景推荐）:
+#    vllm:
+#      enabled: true
+#      gpu_memory_utilization: 0.9
+#      tensor_parallel_size: 1
+#      max_model_len: 4096
 #
 # ================================================================================
