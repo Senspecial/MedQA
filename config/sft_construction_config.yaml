@@ -1,0 +1,120 @@
+# SFT 数据构造配置
+# 使用 DeepSeek 对原始医疗问答进行增强，生成带推理链 + 模拟搜索的高质量回答
+#
+# 输出格式（每条对话的 assistant 回复）:
+#   <think>推理过程...</think>
+#   <tool_call>{"name":"search","arguments":{"query":"检索关键词"}}</tool_call>
+#   <search_result>模拟检索到的知识...</search_result>
+#   <think>基于检索结果继续推理...</think>   ← 可多轮
+#   <tool_call>...</tool_call>               ← 可多次搜索
+#   <search_result>...</search_result>
+#   <answer>最终医疗回答...</answer>
+
+# ============================================
+# DeepSeek API 配置
+# ============================================
+deepseek:
+  api_key: "sk-671b3cdab42d46e093da1a7661a30edd"             # 替换为你的 DeepSeek API Key，或通过环境变量 DEEPSEEK_API_KEY 设置
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"        # deepseek-chat (V3) 或 deepseek-reasoner (R1)
+  temperature: 0.7
+  max_tokens: 4096
+  max_retries: 3                # 单条失败重试次数
+  retry_delay: 2.0              # 重试间隔（秒）
+  request_interval: 0.5         # 每次请求间隔（秒），避免触发限速
+
+# ============================================
+# 输入数据配置
+# ============================================
+data:
+  input_path: "data/SFT_Agent/merged_data.json"   # 原始问答数据（含 question/answer 字段）
+  output_path: "data/SFT_Agent/sft_constructed.jsonl"  # 构造结果（jsonl 格式）
+  failed_path: "data/SFT_Agent/sft_failed.jsonl"       # 格式校验失败的条目（可人工审查）
+
+  # 从第几条开始处理（支持断点续处理）
+  start_index: 2510
+
+  # ── 数量控制（三个选项按优先级互斥，优先级 target_samples > max_samples > null）──
+  # target_samples: 目标成功条数（构造到成功 N 条即停止，自动应对失败重试）
+  # max_samples   : 最多处理的输入条数上限（null = 不限，可能因失败而成功数 < max_samples）
+  target_samples: 1530   # 已有 970 条，还需 1030 条凑够 2000
+  max_samples: null      # 例: 1000 → 最多处理 1000 条输入（成功数 ≤ 1000）
+
+  # 随机采样：true = 对输入数据随机打乱后取样（避免总取最前面的数据）
+  shuffle: false
+  shuffle_seed: 42
+
+  # 去重：相同 question 只处理一次（推荐 true，原始数据有同题多答的情况）
+  dedup_questions: true
+
+# ============================================
+# 格式校验
+# ============================================
+validation:
+  # 必须包含的标签（缺少则记为失败）
+  required_tags:
+    - "<think>"
+    - "</think>"
+    - "<tool_call>"
+    - "</tool_call>"
+    - "<search_result>"
+    - "</search_result>"
+    - "<answer>"
+    - "</answer>"
+
+  # answer 内容最少字数（字符数）
+  min_answer_length: 20
+
+  # 最多允许多少次 tool_call（防止 DeepSeek 生成过长序列）
+  max_tool_calls: 4
+
+# ============================================
+# 输出格式
+# ============================================
+output:
+  # chat 格式（可直接用于 LLaMA-Factory / TRL SFT）
+  format: "chat"    # chat | alpaca
+  # chat 格式: {"messages": [{"role":"system",...},{"role":"user",...},{"role":"assistant",...}]}
+  # alpaca 格式: {"instruction":..., "input":"", "output":...}
+
+  # 是否在输出中保留原始 question/answer 字段（便于人工审查）
+  keep_original: true
+
+# ============================================
+# System Prompt（发送给 DeepSeek 的系统提示）
+# ============================================
+system_prompt: |
+  你是一个专业的医疗健康信息助手，具备搜索医学知识的能力。
+
+  **回答格式要求（严格遵守）**：
+  1. 首先在 <think>...</think> 中分析问题，明确需要搜索哪些医学知识
+  2. 使用 <tool_call>{"name":"search","arguments":{"query":"搜索关键词"}}</tool_call> 进行知识检索
+  3. 在 <search_result>...</search_result> 中给出本次搜索检索到的相关医学知识（你来模拟搜索结果）
+  4. 可以多次重复步骤 1-3（当需要检索不同方面的知识时）
+  5. 最终在 <answer>...</answer> 中给出完整、安全、专业的医疗回答
+
+  **医疗回答原则**：
+  - 使用不确定表述：「可能是」「考虑是」「建议检查」
+  - 不做明确诊断，不开具处方，不给出具体用药剂量
+  - 有危及生命的症状时，明确建议立即就医
+  - 搜索结果应基于真实的医学知识，不要编造虚假数据
+
+  **示例格式**：
+  <think>用户询问头痛问题，需要搜索头痛的常见原因和处理建议。</think>
+  <tool_call>{"name":"search","arguments":{"query":"头痛常见原因"}}</tool_call>
+  <search_result>头痛的常见原因包括：紧张性头痛（最常见，约占70%）、偏头痛、丛集性头痛、颈椎病、高血压、感冒发热等。紧张性头痛通常表现为双侧压迫感，偏头痛多为单侧搏动性疼痛，伴恶心呕吐。</search_result>
+  <think>了解了头痛原因，还需要搜索头痛的就医建议和缓解方法。</think>
+  <tool_call>{"name":"search","arguments":{"query":"头痛就医指征 缓解方法"}}</tool_call>
+  <search_result>头痛就医指征：突发剧烈头痛、伴发热颈强直、头痛进行性加重、伴神经系统症状应立即就医。一般性头痛缓解：休息、热敷、可服用对乙酰氨基酚或布洛芬（按说明书剂量）。</search_result>
+  <think>已获取足够信息，可以给出完整回答。</think>
+  <answer>头痛的原因很多，常见的有紧张性头痛、偏头痛、颈椎病、感冒发热等。建议先注意休息，保持充足睡眠。如果出现以下情况请立即就医：突然发生的剧烈头痛、伴随发热和颈部僵硬、头痛持续加重或伴随视力异常、手脚无力等神经症状。一般性头痛可适当休息或在医生指导下服用止痛药，但不建议长期依赖止痛药。具体病因需要医生检查确认。</answer>
+
+# ============================================
+# 并发配置
+# ============================================
+concurrency:
+  # 并发工作线程数（建议 1-5，过高容易触发 API 限速）
+  num_workers: 3
+
+  # 每处理多少条保存一次进度（防止中断丢失数据）
+  save_every: 50

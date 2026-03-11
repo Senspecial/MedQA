@@ -10,7 +10,7 @@ vllm:
   max_model_len: 2048            # 最大序列长度（prompt + 输出 token 总数上限）
   dtype: "auto"                  # 数据类型：auto / float16 / bfloat16
   # LoRA 相关（is_lora=true 时生效），须 >= 训练时使用的 lora_r
-  max_lora_rank: 64
+  max_lora_rank: 16
 
 input_data:
   data_path: /root/autodl-tmp/MedQA/output/train.json

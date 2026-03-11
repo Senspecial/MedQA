@@ -1,0 +1,179 @@
+# 增量预训练 (Continual Pre-Training, CPT) 配置文件
+# 在 SFT 之前执行，让模型在医学领域语料上进行领域知识注入
+# 使用因果语言建模目标 (CLM)，即下一个 token 预测
+# 训练结束后自动在 valid/test 集上评估 PPL 和 next-token Accuracy
+
+# ============================================
+# 模型配置
+# ============================================
+model:
+  base_model_path: "Qwen3.5-0.8B-Base/Qwen/Qwen3___5-0___8B-Base"  # 本地模型路径
+  output_dir: "model_output/qwen3_5_0_8b_cpt"                   # CPT 输出路径（LoRA adapter）
+  trust_remote_code: true
+
+# ============================================
+# 数据配置
+# ============================================
+data:
+  # 已划分好的 train / valid / test 文件，直接使用，无需自动划分
+  # 支持格式: .txt / .json / .jsonl（逐行 JSON）/ .csv
+  train_path: "data/pt/train_encyclopedia.json"
+  valid_path: "data/pt/valid_encyclopedia.json"
+  test_path:  "data/pt/test_encyclopedia.json"
+
+  # json/jsonl/csv 中的文本字段名
+  text_field: "text"
+
+  # 序列分块长度 (tokens)，推荐 512~2048
+  max_length: 1024
+
+  # 将所有 token 拼接后切块，充分利用每个 batch，减少 padding 浪费（推荐）
+  pack_sequences: true
+
+  # 最多加载的训练样本数（null 表示全量）
+  max_train_samples: null
+
+# ============================================
+# LoRA 配置（推荐使用 LoRA 降低显存开销）
+# ============================================
+lora:
+  enabled: true
+  r: 8                  # 秩，CPT 建议比 SFT 更大（SFT 通常用 16）
+  lora_alpha: 16
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# ============================================
+# 量化配置
+# RTX 4090 + 2B 模型：显存充足，关闭 4bit 量化以提升训练速度
+# ============================================
+quantization:
+  use_4bit: false              # 4090 显存够用，关闭 4bit 量化（去掉解量化开销）
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: false
+
+# ============================================
+# 训练超参数
+# ============================================
+training:
+  num_train_epochs: 0.5
+  per_device_train_batch_size: 4    # 激活值较大，保持4防OOM
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8    # 等效总 batch=32
+  learning_rate: 1.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  optim: "adamw_torch"              # fp16/bf16 LoRA 用标准 adamw 更快
+  fp16: false
+  bf16: true                        # 4090 原生支持 bf16，比 fp16 更快更稳
+  gradient_checkpointing: true      # 2B 模型激活值较大，开启以防 OOM
+  logging_steps: 20
+  save_steps: 200
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 200
+  resume_from_checkpoint: false
+  report_to: "tensorboard"
+  seed: 42
+  dataloader_num_workers: 4         # 多进程数据预加载
+
+# ============================================
+# 评估配置（训练完成后对 valid/test 集评估）
+# ============================================
+evaluation:
+  eval_batch_size: 8     # 评估时加大 batch
+
+# ============================================
+# 快速验证场景（--scenario quick_test）
+# ============================================
+quick_test:
+  model:
+    base_model_path: "Qwen3.5-0.8B-Base/Qwen/Qwen3___5-0___8B-Base"
+    output_dir: "model_output/qwen3_5_0_8b_cpt"
+  data:
+    train_path: "data/pt/train_encyclopedia.json"
+    valid_path: "data/pt/valid_encyclopedia.json"
+    test_path:  "data/pt/test_encyclopedia.json"
+    text_field: "text"
+    max_length: 512
+    pack_sequences: false
+    max_train_samples: 500
+  lora:
+    enabled: true
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    bias: "none"
+  quantization:
+    use_4bit: true
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_compute_dtype: "float16"
+    bnb_4bit_use_double_quant: false
+  training:
+    num_train_epochs: 1
+    per_device_train_batch_size: 2
+    per_device_eval_batch_size: 2
+    gradient_accumulation_steps: 4
+    learning_rate: 1.0e-4
+    logging_steps: 5
+    save_steps: 50
+    eval_strategy: "steps"
+    eval_steps: 50
+  evaluation:
+    eval_batch_size: 2
+
+# ============================================
+# 标准预训练场景（--scenario standard）
+# ============================================
+standard:
+  model:
+    base_model_path: "Qwen3.5-0.8B-Base/Qwen/Qwen3___5-0___8B-Base"
+    output_dir: "model_output/qwen3_5_0_8b_cpt"
+  data:
+    train_path: "data/pt/train_encyclopedia.json"
+    valid_path: "data/pt/valid_encyclopedia.json"
+    test_path:  "data/pt/test_encyclopedia.json"
+    text_field: "text"
+    max_length: 1024
+    pack_sequences: true
+    max_train_samples: null
+  lora:
+    enabled: true
+    r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+    bias: "none"
+  quantization:
+    use_4bit: false
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_compute_dtype: "bfloat16"
+    bnb_4bit_use_double_quant: false
+  training:
+    num_train_epochs: 0.5
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 8
+    gradient_accumulation_steps: 4
+    learning_rate: 5.0e-5
+    optim: "adamw_torch"
+    fp16: false
+    bf16: true
+    gradient_checkpointing: true
+    dataloader_num_workers: 4
+    per_device_train_batch_size: 4
+    per_device_eval_batch_size: 4
+    gradient_accumulation_steps: 8
+    save_steps: 500
+    eval_strategy: "steps"
+    eval_steps: 500
+  evaluation:
+    eval_batch_size: 4

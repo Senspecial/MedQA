@@ -121,31 +121,55 @@ def load_and_merge_lora_model(
 
 
 def load_dpo_dataset(
-    data_path: str, 
+    data_path: str,
     max_length: int = 512,
     max_prompt_length: int = 256,
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    max_samples: Optional[int] = None,
 ) -> Dataset:
     """
     加载DPO数据集（直接加载，不使用MedicalDataset的tokenization）
-    
-    TRL DPOTrainer会自己处理tokenization，我们只需提供原始文本
-    
+
+    TRL DPOTrainer会自己处理tokenization，我们只需提供原始文本。
+    自动识别 JSON 数组 / JSONL 格式，流式读取。
+
     Args:
         data_path: 数据文件路径
         max_length: 最大长度（传给DPOTrainer配置）
         max_prompt_length: 最大prompt长度（传给DPOTrainer配置）
         system_prompt: 系统提示
-        
+        max_samples: 最大样本数（None = 全量）
+
     Returns:
         Dataset对象（TRL DPO格式：prompt, chosen, rejected）
     """
-    logger.info(f"\n📂 加载DPO数据: {data_path}")
-    
-    # 直接加载JSON
-    with open(data_path, 'r', encoding='utf-8') as f:
-        raw_data = json.load(f)
-    
+    logger.info(f"\n加载DPO数据: {data_path}")
+
+    # 自动识别格式，流式读取，避免大文件一次性加载
+    with open(data_path, "r", encoding="utf-8") as f:
+        first_char = f.read(1)
+
+    if first_char == "[":
+        with open(data_path, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+        if not isinstance(raw_data, list):
+            raw_data = [raw_data]
+        if max_samples:
+            raw_data = raw_data[:max_samples]
+    else:
+        raw_data = []
+        with open(data_path, "r", encoding="utf-8") as f:
+            for lineno, line in enumerate(f, 1):
+                if max_samples and len(raw_data) >= max_samples:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw_data.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    logger.warning(f"第 {lineno} 行解析失败，已跳过: {e}")
+
     logger.info(f"原始数据样本数: {len(raw_data)}")
     
     # 格式化为TRL格式
@@ -153,13 +177,13 @@ def load_dpo_dataset(
     system_msg = system_prompt or "你是一个专业的医疗助手。"
     
     for item in raw_data:
-        # 从DPO构造数据中提取字段
-        prompt = item.get('prompt', '')
-        chosen = item.get('chosen', '')
-        rejected = item.get('rejected', '')
-        
+        # 兼容多种字段命名风格
+        prompt = (item.get('prompt') or item.get('question') or item.get('instruction') or '').strip()
+        chosen = (item.get('chosen') or item.get('response_chosen') or item.get('accepted') or '').strip()
+        rejected = (item.get('rejected') or item.get('response_rejected') or item.get('declined') or '').strip()
+
         if not prompt or not chosen or not rejected:
-            logger.warning(f"跳过不完整的样本: {item.get('metadata', {}).get('source_id', 'unknown')}")
+            logger.warning(f"跳过不完整的样本: {list(item.keys())}")
             continue
         
         # 构建完整的prompt（TRL格式）
@@ -180,59 +204,76 @@ def load_dpo_dataset(
     return dataset
 
 
+def _resolve_path(path: Optional[str], root: Path) -> Optional[str]:
+    if not path:
+        return None
+    return path if os.path.isabs(path) else str(root / path)
+
+
 def load_model_and_tokenizer(model_config: Dict, project_root: Path):
-    """加载模型和分词器（支持从SFT LoRA开始）"""
-    
-    base_model_path = model_config['base_model_path']
-    if not os.path.isabs(base_model_path):
-        base_model_path = os.path.join(project_root, base_model_path)
-    
-    is_sft_lora = model_config.get('is_lora', False)
-    sft_checkpoint = model_config.get('sft_checkpoint_path')
-    
-    # 如果SFT模型是LoRA，先加载并合并
-    if is_sft_lora and sft_checkpoint:
-        if not os.path.isabs(sft_checkpoint):
-            sft_checkpoint = os.path.join(project_root, sft_checkpoint)
-        
-        logger.info("\n📥 加载SFT LoRA模型...")
-        model, tokenizer = load_and_merge_lora_model(
-            base_model_path=base_model_path,
-            lora_checkpoint_path=sft_checkpoint,
-            merge_lora=True  # 合并SFT LoRA，然后在其基础上训练DPO
-        )
-        
-        # 调整tokenizer设置（DPO训练需要）
-        tokenizer.padding_side = "right"  # DPO训练使用right padding
-        
-    else:
-        # 没有SFT checkpoint或不是LoRA，直接加载基础模型
-        logger.info(f"\n📥 加载基础模型...")
-        logger.info(f"  模型路径: {base_model_path}")
-        
-        tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path,
-            trust_remote_code=True,
-            padding_side="right"  # DPO训练使用right padding
-        )
-        
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-        
-        model = AutoModelForCausalLM.from_pretrained(
-            base_model_path,
-            trust_remote_code=True,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None,
-            use_cache=False  # DPO训练时禁用cache
-        )
-        
-        logger.info("✓ 基础模型加载完成")
-    
-    # 禁用模型缓存（DPO训练要求）
+    """加载模型和分词器，支持 CPT + SFT 双阶段动态挂载。
+
+    加载顺序（按需）：
+      1. Base Model
+      2. mount + merge CPT LoRA  （cpt_adapter_path 不为 null 时）
+      3. mount + merge SFT LoRA  （sft_checkpoint_path 不为 null 时）
+      4. DPO LoRA 将由 DPOTrainer 负责套上
+
+    精度优先级：bf16 > fp16 > fp32（从 model_config.dtype 或 CUDA 可用性推断）
+    """
+    use_cuda = torch.cuda.is_available()
+
+    # 精度解析
+    dtype_str = model_config.get("dtype", "bf16" if use_cuda else "fp32")
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+    model_dtype = dtype_map.get(dtype_str, torch.bfloat16)
+    logger.info(f"模型精度: {dtype_str}")
+
+    base_model_path = _resolve_path(model_config["base_model_path"], project_root)
+    cpt_adapter_path = _resolve_path(model_config.get("cpt_adapter_path"), project_root)
+    sft_adapter_path = _resolve_path(model_config.get("sft_checkpoint_path"), project_root)
+
+    logger.info("=" * 60)
+    logger.info(f"Base model  : {base_model_path}")
+    logger.info(f"CPT adapter : {cpt_adapter_path or '(跳过)'}")
+    logger.info(f"SFT adapter : {sft_adapter_path or '(跳过)'}")
+    logger.info("=" * 60)
+
+    # ── 1. 加载 tokenizer ────────────────────────────────────────────────
+    tokenizer = AutoTokenizer.from_pretrained(
+        base_model_path,
+        trust_remote_code=True,
+        padding_side="right",
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    # ── 2. 加载 base model ───────────────────────────────────────────────
+    logger.info("加载 Base Model ...")
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model_path,
+        trust_remote_code=True,
+        torch_dtype=model_dtype if use_cuda else torch.float32,
+        device_map={"": torch.cuda.current_device()} if use_cuda else None,
+    )
     model.config.use_cache = False
-    
+
+    # ── 3. 动态挂载 CPT LoRA（如有）────────────────────────────────────
+    if cpt_adapter_path:
+        logger.info(f"挂载 CPT adapter: {cpt_adapter_path}")
+        model = PeftModel.from_pretrained(model, cpt_adapter_path, is_trainable=False)
+        model = model.merge_and_unload()
+        logger.info("CPT adapter 已 merge")
+
+    # ── 4. 动态挂载 SFT LoRA（如有）────────────────────────────────────
+    if sft_adapter_path:
+        logger.info(f"挂载 SFT adapter: {sft_adapter_path}")
+        model = PeftModel.from_pretrained(model, sft_adapter_path, is_trainable=False)
+        model = model.merge_and_unload()
+        logger.info("SFT adapter 已 merge，DPO LoRA 将在此基础上训练")
+
+    model.config.use_cache = False
     return model, tokenizer
 
 
@@ -329,18 +370,20 @@ def train_dpo(config_path: str):
         train_data_path,
         max_length=data_config.get('max_length', 512),
         max_prompt_length=data_config.get('max_prompt_length', 256),
-        system_prompt=system_prompt
+        system_prompt=system_prompt,
+        max_samples=data_config.get('max_train_samples'),
     )
-    
+
     eval_dataset = None
     if eval_data_path:
         eval_dataset = load_dpo_dataset(
             eval_data_path,
             max_length=data_config.get('max_length', 512),
             max_prompt_length=data_config.get('max_prompt_length', 256),
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            max_samples=data_config.get('max_eval_samples'),
         )
-        logger.info(f"评估集样本数: {len(eval_dataset)}")
+        logger.info(f"验证集样本数: {len(eval_dataset)}")
     
     # 4. 配置训练参数
     logger.info("\n⚙️ 配置训练参数...")
@@ -368,10 +411,12 @@ def train_dpo(config_path: str):
         max_length=data_config.get('max_length', 512),
         max_prompt_length=data_config.get('max_prompt_length', 256),
         
-        # 评估参数
-        eval_strategy=training_config.get('eval_strategy', 'steps'),
-        eval_steps=training_config.get('eval_steps', 100),
-        
+        # 评估参数：有验证集时自动开启，无验证集时强制关闭
+        eval_strategy=training_config.get('eval_strategy', 'steps') if eval_dataset else 'no',
+        eval_steps=training_config.get('eval_steps', 100) if eval_dataset else None,
+        load_best_model_at_end=training_config.get('load_best_model_at_end', True) if eval_dataset else False,
+        metric_for_best_model=training_config.get('metric_for_best_model', 'eval_loss') if eval_dataset else None,
+
         # 保存参数
         save_strategy=training_config.get('save_strategy', 'steps'),
         save_steps=training_config.get('save_steps', 200),
@@ -382,8 +427,9 @@ def train_dpo(config_path: str):
         logging_dir=os.path.join(output_dir, 'logs'),
         report_to=training_config.get('report_to', ['tensorboard']),
         
-        # 其他参数
-        fp16=torch.cuda.is_available(),
+        # 精度：从 model_config.dtype 读取，与模型加载保持一致
+        bf16=model_config.get("dtype", "bf16") == "bf16" and torch.cuda.is_available(),
+        fp16=model_config.get("dtype", "bf16") == "fp16" and torch.cuda.is_available(),
         remove_unused_columns=False,
         gradient_checkpointing=training_config.get('gradient_checkpointing', False),
         
@@ -403,6 +449,9 @@ def train_dpo(config_path: str):
         logger.info("  使用LoRA训练（DPOTrainer将应用peft_config）")
     else:
         logger.info("  使用全参数训练")
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
+
     
     trainer = DPOTrainer(
         model=model,

@@ -1,0 +1,91 @@
+# SFT (Supervised Fine-Tuning) 配置文件
+# 运行: python src/training/scripts/run_sft.py --config config/sft_config.yaml
+
+# ============================================
+# 模型配置
+# ============================================
+model:
+  base_model_path: "/root/autodl-tmp/MedQA/Qwen3.5-0.8B-Base/Qwen/Qwen3___5-0___8B-Base"
+  # CPT adapter 路径（动态挂载）：运行时 merge 进 base model，无需预先合并到磁盘
+  # 设为 null 则直接从 base_model_path 开始 SFT
+  cpt_adapter_path: "model_output/qwen3_5_0_8b_cpt"
+  output_dir: "model_output/qwen3_5_0_8b_sft"
+  trust_remote_code: true
+
+# ============================================
+# LoRA 配置
+# ============================================
+lora:
+  enabled: true
+  use_4bit: false           # 显存充足时关闭，速度更快；不足时开启 QLoRA
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# ============================================
+# 量化配置（use_4bit=true 时生效）
+# ============================================
+quantization:
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: false
+
+# ============================================
+# 数据配置
+# ============================================
+data:
+  train_path: "data/SFT/train_zh_0.json"
+  valid_path: "data/SFT/valid_zh_0.json"
+  test_path:  "data/SFT/test_zh_0.json"
+  max_length: 512
+  max_train_samples: 50000   # 训练集最大样本数（null = 全量 195 万，内存需求极大）
+  max_valid_samples: 2000    # 验证集最大样本数（null = 全量）
+  # 系统提示来源：引用已有的 system_prompt.yaml（推荐），或在下方 inline 填写
+  system_prompt_path: "config/system_prompt.yaml"
+
+# ============================================
+# 训练超参数
+# ============================================
+training:
+  num_train_epochs: 1
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  optim: "adamw_torch"          # use_4bit=true 时建议改为 paged_adamw_8bit
+  fp16: false
+  bf16: true                    # RTX 4090 推荐 bf16
+  gradient_checkpointing: true
+  logging_steps: 10
+  save_steps: 200
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 200
+  load_best_model_at_end: true
+  report_to: "tensorboard"
+  remove_unused_columns: false
+  seed: 42
+  dataloader_num_workers: 4
+
+# ============================================
+# 测试集评估配置（训练完成后执行）
+# ============================================
+evaluation:
+  enabled: true
+  num_samples: 500              # 生成评估的样本数（None = 全量，建议 ≤500）
+  max_new_tokens: 256
+  # BERTScore 模型：本地路径或 null（null = 自动下载，无网时跳过）
+  bertscore_model_path: null    # 例: "/root/autodl-tmp/bert-base-chinese"
+  save_path: null               # null = 自动保存到 output_dir/sft_eval_results.json

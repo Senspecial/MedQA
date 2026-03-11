@@ -11,7 +11,7 @@ model_output/
 output/
 Qwen3.5-0.8B-Base/
 data/
-
+kb/index/
 
 merged_data.json
 

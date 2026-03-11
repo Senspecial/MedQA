@@ -1,0 +1,66 @@
+# 本地医学知识库配置
+
+# 数据源配置
+data:
+  # 数据格式：
+  #   "qa"  - QA 对格式，每行 {"instruction": "问题", "input": "", "output": "答案"}
+  #   "text" - 百科文本格式，每行 {"text": "..."}
+  format: "qa"
+
+  # QA 格式专属：用哪部分做嵌入向量（决定检索语义）
+  #   "question"          - 只对问题编码（推荐：查询通常也是问句）
+  #   "answer"            - 只对答案编码（适合症状/概念查询）
+  #   "question_answer"   - 问题+答案拼接编码（覆盖广，噪声略大）
+  embed_field: "question"
+
+  # QA 格式专属：过滤掉答案过短的低质量条目（字符数）
+  min_answer_length: 10
+
+  sources:
+    - "../data/SFT/train_zh_0.json"
+    - "../data/SFT/valid_zh_0.json"
+
+  # 最大加载条数，设为 null 则加载全部
+  # 195 万条全量建索引预计需要 ~8GB 内存 + 数小时编码时间
+  # 建议先用 100K 验证效果
+  max_docs: 100000
+
+  # 文本最大长度（字符数，超长截断）
+  max_text_length: 512
+
+# 嵌入模型配置
+embedding:
+  # 中文医学文本推荐 bge-large-zh-v1.5（1024维）或 bge-small-zh-v1.5（512维，更快）
+  model_name: "BAAI/bge-large-zh-v1.5"
+  batch_size: 256
+  device: "cuda"
+  dimension: 1024
+  # BGE 模型查询时的前缀指令（文档编码不加前缀，查询时加）
+  query_instruction: "为这个句子生成表示以用于检索相关文章："
+
+# FAISS 索引配置
+faiss:
+  # flat：精确搜索，适合 <5 万条；ivf：近似搜索，适合大规模
+  index_type: "ivf"
+  # IVF 聚类中心数，建议 ≈ sqrt(doc_count)
+  # 10万条 → 316，50万条 → 707，100万条 → 1000
+  nlist: 316
+  # 搜索时探测的聚类数，越大越精准越慢，建议 nlist 的 10%
+  nprobe: 32
+
+# 索引存储路径
+index:
+  dir: "./index"
+  faiss_file: "index.bin"
+  corpus_file: "corpus.jsonl"
+
+# HTTP 搜索服务配置
+server:
+  host: "0.0.0.0"
+  port: 8000
+  default_top_k: 5
+  max_top_k: 20
+
+# 搜索配置
+search:
+  default_top_k: 5

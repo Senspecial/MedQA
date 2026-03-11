@@ -70,6 +70,7 @@ class MedicalDataset:
         dataset_type: str = "sft",  # "sft" 或 "dpo"
         max_length: int = 512,
         system_prompt: Optional[str] = None,
+        max_samples: Optional[int] = None,
     ):
         """
         初始化医疗数据集
@@ -82,6 +83,7 @@ class MedicalDataset:
         """
         self.dataset_type = dataset_type
         self.max_length = max_length
+        self.max_samples = max_samples
         self.raw_data = []
         
         # 系统提示：优先使用传入的，否则从配置文件加载完整版本
@@ -106,21 +108,41 @@ class MedicalDataset:
             raise ValueError(f"data must be str (path) or list (data), got {type(data)}")
     
     def _load_data_from_file(self):
-        """从文件加载医疗数据集"""
+        """从文件加载医疗数据集，自动识别 JSON 数组 / JSONL 格式，流式读取。"""
         logger.info(f"Loading medical dataset from {self.data_path}")
-        
+
         if not os.path.exists(self.data_path):
             raise FileNotFoundError(f"Dataset file {self.data_path} not found")
-        
-        if self.data_path.endswith(".json"):
-            with open(self.data_path, "r", encoding="utf-8") as f:
-                self.raw_data = json.load(f)
-        elif self.data_path.endswith(".jsonl"):
-            with open(self.data_path, "r", encoding="utf-8") as f:
-                self.raw_data = [json.loads(line) for line in f]
-        else:
+
+        if not (self.data_path.endswith(".json") or self.data_path.endswith(".jsonl")):
             raise ValueError(f"Unsupported file format: {self.data_path}")
-        
+
+        # 用首行首字符判断格式，避免将大文件一次性读入内存
+        with open(self.data_path, "r", encoding="utf-8") as f:
+            first_char = f.read(1)
+
+        if first_char == "[":
+            # 标准 JSON 数组（通常文件较小）
+            with open(self.data_path, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
+            self.raw_data = parsed if isinstance(parsed, list) else [parsed]
+            if self.max_samples and len(self.raw_data) > self.max_samples:
+                self.raw_data = self.raw_data[: self.max_samples]
+        else:
+            # JSONL：每行一个 JSON 对象，流式逐行解析，支持提前截断
+            self.raw_data = []
+            with open(self.data_path, "r", encoding="utf-8") as f:
+                for lineno, line in enumerate(f, 1):
+                    if self.max_samples and len(self.raw_data) >= self.max_samples:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        self.raw_data.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"第 {lineno} 行解析失败，已跳过: {e}")
+
         logger.info(f"Loaded {len(self.raw_data)} examples")
     
     # 保留向后兼容
@@ -130,22 +152,65 @@ class MedicalDataset:
             self._load_data_from_file()
     
     def _format_sft_example(self, example: Dict) -> Dict:
-        """格式化SFT样本"""
-        # 支持多种字段名
+        """格式化SFT样本，自动识别单轮（instruction/output）和多轮（messages）格式。"""
+        # ── 多轮 messages 格式（sft_agent_r1.jsonl） ──
+        if "messages" in example:
+            return self._format_messages_example(example)
+
+        # ── 单轮 instruction/output 格式（train_zh_0.json） ──
         query = example.get("question") or example.get("query") or example.get("instruction") or ""
         response = example.get("answer") or example.get("response") or example.get("output") or ""
-        
+
         if not query or not response:
             logger.warning(f"Empty query or response found in data: {example.keys()}")
             return None
-        
-        # 构建Qwen2的输入格式
-        # 基于Chatml格式
+
         formatted_text = f"<|im_start|>system\n{self.system_prompt}<|im_end|>\n"
         formatted_text += f"<|im_start|>user\n{query}<|im_end|>\n"
         formatted_text += f"<|im_start|>assistant\n{response}<|im_end|>"
-        
+
         return {"text": formatted_text}
+
+    def _format_messages_example(self, example: Dict) -> Optional[Dict]:
+        """
+        将多轮 messages 格式转为 ChatML 文本，并记录每条 assistant 消息的字符区间，
+        供 tokenize 时做 loss mask（只对 assistant 回复计算 loss）。
+
+        返回：{"text": str, "assistant_spans": List[Tuple[int, int]]}
+        其中 assistant_spans 是 assistant 内容（不含 <|im_start|>assistant\n 前缀）
+        在 text 中的 [start, end) 字符区间列表。
+        """
+        messages = example.get("messages", [])
+        if not messages:
+            return None
+
+        # 若数据中已有 system 消息，使用其内容；否则注入配置的 system_prompt
+        has_system = any(m["role"] == "system" for m in messages)
+        if not has_system:
+            messages = [{"role": "system", "content": self.system_prompt}] + messages
+
+        text = ""
+        assistant_spans: List[Tuple[int, int]] = []
+
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            prefix = f"<|im_start|>{role}\n"
+            suffix = "<|im_end|>\n"
+
+            segment_start = len(text)
+            text += prefix + content + suffix
+
+            if role == "assistant":
+                # 只对 assistant 内容部分计算 loss（前缀不算）
+                content_start = segment_start + len(prefix)
+                content_end   = content_start + len(content) + len("<|im_end|>")
+                assistant_spans.append((content_start, content_end))
+
+        if not assistant_spans:
+            return None
+
+        return {"text": text, "assistant_spans": assistant_spans}
     
     def _format_dpo_example(self, example: Dict) -> Dict:
         """格式化DPO样本"""
@@ -173,40 +238,78 @@ class MedicalDataset:
         }
     
     def get_sft_dataset(self, tokenizer: PreTrainedTokenizer) -> Dataset:
-        """获取SFT格式的数据集"""
+        """获取SFT格式的数据集。
+
+        支持两种格式：
+        - 单轮（instruction/output）：对全部 token 计算 loss
+        - 多轮 messages：只对 assistant 回复部分计算 loss（其余置 -100）
+        """
         if self.dataset_type != "sft":
             logger.warning(f"Dataset type is {self.dataset_type}, but requesting SFT dataset")
-        
-        # 格式化数据
+
         formatted_data = []
         for example in self.raw_data:
             formatted_example = self._format_sft_example(example)
             if formatted_example:
                 formatted_data.append(formatted_example)
-        
+
+        # 统计格式类型
+        has_spans = any("assistant_spans" in d for d in formatted_data)
+        if has_spans:
+            logger.info("检测到多轮 messages 格式，将对 assistant 回复部分应用 loss mask")
+        else:
+            logger.info("检测到单轮 instruction/output 格式")
+
+        # 确保字段统一（单轮数据没有 assistant_spans）
+        for d in formatted_data:
+            d.setdefault("assistant_spans", [])
+
         dataset = Dataset.from_list(formatted_data)
-        
-        # 对数据进行分词处理
+
+        max_length = self.max_length
+
         def tokenize_function(examples):
             outputs = tokenizer(
                 examples["text"],
                 truncation=True,
-                max_length=self.max_length,
+                max_length=max_length,
                 padding="max_length",
-                return_tensors="pt"
+                return_offsets_mapping=True,  # 字符偏移 → token 对应关系
             )
-            
-            # 为了训练语言模型，labels与input_ids相同
-            outputs["labels"] = outputs["input_ids"].clone()
-            
+
+            all_labels = []
+            for i, (input_ids, attn_mask, offsets, spans) in enumerate(zip(
+                outputs["input_ids"],
+                outputs["attention_mask"],
+                outputs["offset_mapping"],
+                examples["assistant_spans"],
+            )):
+                if not spans:
+                    # 单轮格式：只屏蔽 padding
+                    labels = [t if m == 1 else -100
+                              for t, m in zip(input_ids, attn_mask)]
+                else:
+                    # 多轮格式：只对 assistant 区间内的 token 保留 label
+                    labels = [-100] * len(input_ids)
+                    for (char_start, char_end) in spans:
+                        for tok_idx, (tok_start, tok_end) in enumerate(offsets):
+                            if attn_mask[tok_idx] == 0:
+                                continue
+                            # token 与 assistant 区间有重叠则保留
+                            if tok_end > char_start and tok_start < char_end:
+                                labels[tok_idx] = input_ids[tok_idx]
+                all_labels.append(labels)
+
+            outputs["labels"] = all_labels
+            del outputs["offset_mapping"]
             return outputs
-        
+
         tokenized_dataset = dataset.map(
             tokenize_function,
             batched=True,
-            remove_columns=["text"]
+            remove_columns=["text", "assistant_spans"],
         )
-        
+
         return tokenized_dataset
     
     def get_dpo_dataset(self, tokenizer: PreTrainedTokenizer, max_length: Optional[int] = None, max_prompt_length: Optional[int] = None, max_response_length: Optional[int] = None,) -> Dataset:

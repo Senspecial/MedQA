@@ -1,0 +1,94 @@
+# Agent SFT 配置文件
+# 使用多轮 messages 格式数据（含 think/tool_call/tool_response/answer），
+# 让模型学会 Agent-R1 的工具调用范式，作为 RL 训练的冷启动。
+#
+# 运行: python src/training/scripts/run_sft.py --config config/agent_sft_config.yaml
+
+# ============================================
+# 模型配置
+# ============================================
+model:
+  # CPT + SFT + DPO 三个 adapter 顺序合并后的完整模型
+  # 运行: python scripts/merge_adapters.py
+  base_model_path: "model_output/qwen3_5_0_8b_merged"
+  cpt_adapter_path: null    # 已合并进 base_model，无需再挂载
+  output_dir: "model_output/qwen3_5_0_8b_agent_sft"
+  trust_remote_code: true
+
+# ============================================
+# LoRA 配置
+# ============================================
+lora:
+  enabled: true
+  use_4bit: false
+  r: 16                 # Agent SFT 任务更复杂，适当增大 rank
+  lora_alpha: 32
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+
+# ============================================
+# 量化配置（use_4bit=true 时生效）
+# ============================================
+quantization:
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_compute_dtype: "bfloat16"
+  bnb_4bit_use_double_quant: false
+
+# ============================================
+# 数据配置
+# ============================================
+data:
+  # 多轮 Agent 数据（由 run_sft_format_convert.py 生成）
+  train_path: "data/SFT_Agent/sft_agent_r1.jsonl"
+  valid_path: "data/SFT_Agent/sft_agent_r1.jsonl"
+  test_path:  "data/SFT_Agent/sft_agent_r1.jsonl"
+  # 多轮 Agent 对话每条平均 1500~3000 token，需要足够大的 max_length
+  max_length: 4096
+  max_train_samples: null   # 全量（~2500 条），数据量小建议全部使用
+  max_valid_samples: 100
+  system_prompt_path: "config/system_prompt.yaml"
+
+# ============================================
+# 训练超参数
+# ============================================
+training:
+  num_train_epochs: 3       # 数据量小，多训几轮
+  per_device_train_batch_size: 1    # 长序列显存压力大，batch=1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 16   # 等效 batch size = 16
+  learning_rate: 1.0e-4     # 略低于普通 SFT，避免过拟合
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  optim: "adamw_torch"
+  fp16: false
+  bf16: true
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 100
+  save_total_limit: 3
+  eval_strategy: "steps"
+  eval_steps: 100
+  load_best_model_at_end: true
+  report_to: "tensorboard"
+  remove_unused_columns: false
+  seed: 42
+  dataloader_num_workers: 2
+
+# ============================================
+# 测试集评估配置（训练完成后执行）
+# ============================================
+evaluation:
+  enabled: false            # Agent SFT 的评估在 Agent-R1 RL 框架中进行，此处关闭
+  num_samples: 50
+  max_new_tokens: 1024
+  bertscore_model_path: null
+  save_path: null

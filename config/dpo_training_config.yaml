@@ -1,17 +1,24 @@
 model:
-  base_model_path: model_output/qwen2_5_1_5b_instruct_sft_merged
-  sft_checkpoint_path: null
-  is_lora: false
+  # Base model 路径（建议填绝对路径）
+  base_model_path: "/root/autodl-tmp/MedQA/Qwen3.5-0.8B-Base/Qwen/Qwen3___5-0___8B-Base"
+  # 动态挂载：运行时 merge 进 base，无需预先合并到磁盘
+  # null = 跳过该阶段
+  cpt_adapter_path: "model_output/qwen3_5_0_8b_cpt"
+  sft_checkpoint_path: "model_output/qwen3_5_0_8b_sft"
+  # 模型精度：bf16（RTX 4090 推荐）/ fp16 / fp32
+  dtype: "bf16"
   save_merged_dpo: false
 data:
-  train_data_path: output/dpo_data/dpo_train_data.json
-  eval_data_path: null
+  train_data_path: data/dpo/train.json
+  eval_data_path: data/dpo/valid.json  # null = 不使用验证集
   max_length: 512
   max_prompt_length: 256
+  max_train_samples: null   # null = 全量；数字 = 截断（JSONL 大文件时有用）
+  max_eval_samples: null
 lora:
   enabled: true
   r: 8
-  lora_alpha: 32
+  lora_alpha: 16
   lora_dropout: 0.05
   bias: none
   target_modules:
@@ -24,8 +31,8 @@ lora:
   - down_proj
 training:
   num_train_epochs: 1
-  per_device_train_batch_size: 2
-  per_device_eval_batch_size: 2
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
   gradient_accumulation_steps: 8
   learning_rate: 5.0e-05
   weight_decay: 0.01
@@ -33,8 +40,10 @@ training:
   max_grad_norm: 1.0
   beta: 0.1
   loss_type: sigmoid
-  eval_strategy: 'no'
+  eval_strategy: steps   # 有 eval_data_path 时自动生效；无验证集时代码强制置 no
   eval_steps: 50
+  load_best_model_at_end: true
+  metric_for_best_model: eval_loss
   save_strategy: steps
   save_steps: 50
   save_total_limit: 3
@@ -44,7 +53,7 @@ training:
   gradient_checkpointing: true
   dataloader_num_workers: 4
 output:
-  output_dir: model_output/qwen2_5_1_5b_dpo
+  output_dir: model_output/qwen3_5_0_8b_dpo
 system_prompt: |
   你是一个专业的医疗健康信息助手，具备全科医学基础知识。
   你的角色是为用户提供准确、安全、实用的健康信息与就医指导，
