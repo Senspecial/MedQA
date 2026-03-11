@@ -9,7 +9,8 @@ docs/
 logs/
 model_output/
 output/
-Qwen2.5-1.5B-Instruct/
+Qwen3.5-0.8B-Base/
+data/
 
 
 merged_data.json
