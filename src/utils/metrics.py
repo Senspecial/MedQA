@@ -125,14 +125,16 @@ class ModelEvaluator:
         self,
         relevance_scores: List[List[float]],
         relevance_labels: List[List[int]],
-        k_values: List[int] = [1, 3, 5, 10]
+        k_values: Optional[List[int]] = None,
     ) -> Dict[str, Dict[str, float]]:
         """计算检索指标（Precision@K, Recall@K, NDCG@K）"""
-        metrics = {
-            f"P@{k}": [],
-            f"R@{k}": [],
-            f"NDCG@{k}": [],
-        for k in k_values}
+        if k_values is None:
+            k_values = [1, 3, 5, 10]
+        metrics: Dict[str, List[float]] = {}
+        for k in k_values:
+            metrics[f"P@{k}"] = []
+            metrics[f"R@{k}"] = []
+            metrics[f"NDCG@{k}"] = []
         
         for scores, labels in zip(relevance_scores, relevance_labels):
             # 按分数排序的索引

@@ -23,10 +23,11 @@ def load_system_prompt_from_config(config_path: str = "config/system_prompt.yaml
     """
     try:
         # 尝试多个可能的路径
+        _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         possible_paths = [
-            config_path,  # 直接路径
-            os.path.join('/root/autodl-tmp/MedQA', config_path),  # 绝对路径
-            os.path.join(os.getcwd(), config_path),  # 当前工作目录
+            config_path,
+            os.path.join(_project_root, config_path),
+            os.path.join(os.getcwd(), config_path),
         ]
         
         for full_path in possible_paths:

@@ -1,0 +1,84 @@
+# 医学 Agent 推理配置文件
+# 运行: python src/inference/agent_inference.py --config config/agent_inference_config.yaml
+
+# ================================================================================
+# 模型配置
+# ================================================================================
+model:
+  # 方式 1（推荐）：使用合并后的完整 Agent 模型
+  #   先运行: python src/training/scripts/merge_lora_model.py \
+  #       --base_model model_output/qwen3_5_0_8b_merged \
+  #       --lora_adapter model_output/qwen3_5_0_8b_agent_sft \
+  #       --output model_output/qwen3_5_0_8b_agent_merged
+  model_path: "model_output/qwen3_5_0_8b_agent_merged"
+  is_lora: false
+
+  # 方式 2：运行时动态合并 LoRA adapter（无需预先合并，但首次加载稍慢）
+  # model_path: "model_output/qwen3_5_0_8b_agent_sft"
+  # base_model_path: "model_output/qwen3_5_0_8b_merged"
+  # is_lora: true
+
+  device: "cuda"
+  load_in_4bit: false     # 显存不足时开启 4bit 量化
+
+# ================================================================================
+# 知识库配置
+# ================================================================================
+knowledge_base:
+  kb_dir: "kb"            # 知识库根目录（含 config.yaml 和 index/）
+  device: "cpu"           # 嵌入模型推理设备（cpu 可节省 GPU 显存给 LLM）
+  top_k: 5                # 每次搜索返回的文档数
+
+# ================================================================================
+# Agent 配置
+# ================================================================================
+agent:
+  max_turns: 5            # 最大工具调用轮数（防止无限循环）
+
+# ================================================================================
+# 生成参数
+# ================================================================================
+generation:
+  max_new_tokens: 1024    # Agent 每轮最大生成 token 数
+  temperature: 0.7
+  top_p: 0.9
+  repetition_penalty: 1.0
+
+# ================================================================================
+# 系统提示
+# ================================================================================
+# 设为 null 使用内置的 Agent 系统提示（推荐，包含工具调用格式说明）
+# 设为 yaml 文件路径则从中加载并追加工具格式说明
+system_prompt: null
+
+# ================================================================================
+# 推理模式
+# ================================================================================
+inference:
+  mode: "interactive"       # interactive / single / batch
+
+  single:
+    question: "糖尿病的早期症状有哪些？"
+
+  batch:
+    input_file: "output/test.json"
+    output_file: "output/agent_results.json"
+    max_samples: 50
+
+# ================================================================================
+# 使用示例
+# ================================================================================
+#
+# 1. 交互式对话（默认）:
+#    python src/inference/agent_inference.py --config config/agent_inference_config.yaml
+#
+# 2. 单问题推理:
+#    python src/inference/agent_inference.py --config config/agent_inference_config.yaml \
+#        --mode single --question "高血压的治疗方法有哪些？"
+#
+# 3. 批量推理:
+#    python src/inference/agent_inference.py --config config/agent_inference_config.yaml \
+#        --mode batch
+#
+# 4. 使用未合并的 LoRA adapter（免预合并）:
+#    修改 model 配置为方式 2，然后正常运行
