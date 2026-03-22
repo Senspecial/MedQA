@@ -10,8 +10,9 @@ model:
   #       --base_model model_output/qwen3_5_0_8b_merged \
   #       --lora_adapter model_output/qwen3_5_0_8b_agent_sft \
   #       --output model_output/qwen3_5_0_8b_agent_merged
-  model_path: "model_output/qwen3_5_0_8b_agent_merged"
-  is_lora: false
+  model_path: "model_output/qwen3_5_0_8b_agent_sft"
+  base_model_path: "model_output/qwen3_5_0_8b_merged"
+  is_lora: true
 
   # 方式 2：运行时动态合并 LoRA adapter（无需预先合并，但首次加载稍慢）
   # model_path: "model_output/qwen3_5_0_8b_agent_sft"
@@ -39,7 +40,7 @@ agent:
 # 生成参数
 # ================================================================================
 generation:
-  max_new_tokens: 1024    # Agent 每轮最大生成 token 数
+  max_new_tokens: 4096    # Agent 每轮最大生成 token 数（含 thinking）
   temperature: 0.7
   top_p: 0.9
   repetition_penalty: 1.0
@@ -61,9 +62,10 @@ inference:
     question: "糖尿病的早期症状有哪些？"
 
   batch:
-    input_file: "output/test.json"
+    # 支持 JSON 和 JSONL，自动从 question/query/instruction/messages 中提取问题
+    input_file: "data/SFT_Agent/sft_agent_r1_test.jsonl"
     output_file: "output/agent_results.json"
-    max_samples: 50
+    max_samples: null                   # null = 全部（~193 条）
 
 # ================================================================================
 # 使用示例

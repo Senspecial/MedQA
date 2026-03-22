@@ -203,15 +203,7 @@ class JudgeModel:
                     time.sleep(2 ** attempt)  # 指数退避
                 else:
                     logger.error(f"评估最终失败: {e}")
-                    # 返回默认值
-                    return {
-                        "hallucination_score": 5.0,
-                        "overreach_score": 5.0,
-                        "quality_score": 5.0,
-                        "readability_score": 5.0,
-                        "overall_comment": "评估失败",
-                        "specific_issues": []
-                    }
+                    return None
         
     def _call_api(self, prompt: str, temperature: float = 0.3) -> Dict:
         """

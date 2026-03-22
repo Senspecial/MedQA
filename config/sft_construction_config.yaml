@@ -14,7 +14,7 @@
 # DeepSeek API 配置
 # ============================================
 deepseek:
-  api_key: "sk-671b3cdab42d46e093da1a7661a30edd"             # 替换为你的 DeepSeek API Key，或通过环境变量 DEEPSEEK_API_KEY 设置
+  api_key: ""                                               # 通过环境变量 DEEPSEEK_API_KEY 设置，或在此填写
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"        # deepseek-chat (V3) 或 deepseek-reasoner (R1)
   temperature: 0.7

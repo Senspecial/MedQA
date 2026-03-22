@@ -38,6 +38,29 @@ from dataclasses import dataclass, field
 import yaml
 
 
+# ─────────────────────────────── 项目根路径 ─────────────────────────────────
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
+
+
+# ─────────────────────────────── 统一提示词加载 ─────────────────────────────
+
+def _load_agent_prompts():
+    """从 config/agent_system_prompt.yaml 加载统一 Agent 提示词"""
+    yaml_path = os.path.join(_PROJECT_ROOT, "config", "agent_system_prompt.yaml")
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        sys_prompt = (cfg.get("agent_system_prompt") or "").strip() or None
+        tool_prompt = (cfg.get("agent_tool_format_prompt") or "").strip() or None
+        return sys_prompt, tool_prompt
+    except Exception:
+        return None, None
+
+_loaded_sys, _loaded_tool = _load_agent_prompts()
+
+
 # ─────────────────────────────── 系统提示模板 ─────────────────────────────────
 
 SYSTEM_PROMPTS = {
@@ -54,19 +77,28 @@ SYSTEM_PROMPTS = {
 <answer>最终回答</answer>
 """,
 
-    # Agent-R1 风格：严格格式约束，适合 RL 训练前的冷启动 SFT
-    "agent_r1": """\
+    # Agent-R1 风格：与推理时一致的完整提示（从统一 yaml 加载）
+    "agent_r1": _loaded_sys or """\
 你是一个专业的医疗健康信息助手，具备搜索医学知识的能力，也可以直接根据已有知识给出回答。
+
+**何时搜索、何时直接回答**：
+- 日常问候（你好、谢谢等）或闲聊（医学以外知识、没有说明具体病因的问题等）：直接回答，不要搜索
+- 你已经有把握的常识性医学问题：直接回答，不要搜索
+- 需要精确数据、指南或不确定的医学问题：先搜索再回答
 
 **搜索时严格遵守以下格式**：
 
-每次需要搜索时：
+需要搜索时：
 <think>分析问题，明确需要搜索哪些医学知识</think>
 <tool_call>{"name":"search","arguments":{"query":"搜索关键词"}}</tool_call>
 
 收到搜索结果后，可继续搜索或给出最终回答：
 <think>基于已有信息进行分析</think>
 <answer>完整、安全、专业的医疗回答</answer>
+
+不需要搜索时，直接回答：
+<think>简要分析</think>
+<answer>回答内容</answer>
 
 **医疗回答原则**：
 - 使用不确定表述：「可能是」「考虑是」「建议检查」
@@ -78,17 +110,30 @@ SYSTEM_PROMPTS = {
     "full": None,  # 从 config/system_prompt.yaml 动态加载后追加工具说明
 }
 
-TOOL_FORMAT_SUFFIX = """
-**工具调用格式（严格遵守）**：
+TOOL_FORMAT_SUFFIX = _loaded_tool or """\
+**何时搜索、何时直接回答**：
+- 日常问候（你好、谢谢等）或闲聊（医学以外知识、没有说明具体病因的问题等）：直接回答，不要搜索
+- 你已经有把握的常识性医学问题：直接回答，不要搜索
+- 需要精确数据、指南或不确定的医学问题：先搜索再回答
 
-每次需要搜索医学知识时：
-<think>分析问题，明确需要搜索什么</think>
+**搜索时严格遵守以下格式**：
+
+需要搜索时：
+<think>分析问题，明确需要搜索哪些医学知识</think>
 <tool_call>{"name":"search","arguments":{"query":"搜索关键词"}}</tool_call>
 
 收到搜索结果后，可继续搜索或给出最终回答：
-<think>基于已有信息进行综合分析</think>
-<answer>完整回答</answer>
-"""
+<think>基于已有信息进行分析</think>
+<answer>完整、安全、专业的医疗回答</answer>
+
+不需要搜索时，直接回答：
+<think>简要分析</think>
+<answer>回答内容</answer>
+
+**医疗回答原则**：
+- 使用不确定表述：「可能是」「考虑是」「建议检查」
+- 不做明确诊断，不开具处方，不给出具体用药剂量
+- 有危及生命的症状时，明确建议立即就医"""
 
 
 # ─────────────────────────────── 解析逻辑 ─────────────────────────────────────
@@ -243,7 +288,7 @@ def build_system_prompt(style: str, base_prompt_path: Optional[str],
         else:
             print(f"[WARN] system_prompt.yaml 未找到: {base_prompt_path}，退回 agent_r1 风格")
             return SYSTEM_PROMPTS["agent_r1"].strip()
-        return base + "\n" + TOOL_FORMAT_SUFFIX.strip()
+        return base + "\n\n" + TOOL_FORMAT_SUFFIX.strip()
 
     prompt = SYSTEM_PROMPTS.get(style)
     if prompt is None:

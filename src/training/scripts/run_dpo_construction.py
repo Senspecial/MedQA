@@ -321,8 +321,10 @@ def evaluate_responses(
     for response, strategy in responses:
         try:
             scores = judge_model.evaluate_response(question, response)
-            
-            # 计算综合得分 (quality为主，减去幻觉和越权的惩罚)
+            if scores is None:
+                logger.warning(f"评审返回 None，跳过该候选")
+                continue
+
             overall_score = (
                 scores['quality_score'] * 0.4 +
                 scores['readability_score'] * 0.2 -

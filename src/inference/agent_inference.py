@@ -44,11 +44,31 @@ from peft import PeftModel
 
 
 # ─────────────────────────── Agent 系统提示 ───────────────────────────────────
+# 从 config/agent_system_prompt.yaml 统一加载，确保训练-推理一致
 
-AGENT_TOOL_FORMAT_PROMPT = """\
+def _load_agent_prompts():
+    """从统一配置加载 Agent 提示词，返回 (system_prompt, tool_format_prompt)"""
+    yaml_path = os.path.join(project_root, "config", "agent_system_prompt.yaml")
+    try:
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        sys_prompt = (cfg.get("agent_system_prompt") or "").strip() or None
+        tool_prompt = (cfg.get("agent_tool_format_prompt") or "").strip() or None
+        return sys_prompt, tool_prompt
+    except Exception:
+        return None, None
+
+_loaded_sys, _loaded_tool = _load_agent_prompts()
+
+AGENT_TOOL_FORMAT_PROMPT = _loaded_tool or """\
+**何时搜索、何时直接回答**：
+- 日常问候（你好、谢谢等）或闲聊（医学以外知识、没有说明具体病因的问题等）：直接回答，不要搜索
+- 你已经有把握的常识性医学问题：直接回答，不要搜索
+- 需要精确数据、指南或不确定的医学问题：先搜索再回答
+
 **搜索时严格遵守以下格式**：
 
-每次需要搜索时：
+需要搜索时：
 <think>分析问题，明确需要搜索哪些医学知识</think>
 <tool_call>{"name":"search","arguments":{"query":"搜索关键词"}}</tool_call>
 
@@ -56,12 +76,16 @@ AGENT_TOOL_FORMAT_PROMPT = """\
 <think>基于已有信息进行分析</think>
 <answer>完整、安全、专业的医疗回答</answer>
 
+不需要搜索时，直接回答：
+<think>简要分析</think>
+<answer>回答内容</answer>
+
 **医疗回答原则**：
 - 使用不确定表述：「可能是」「考虑是」「建议检查」
 - 不做明确诊断，不开具处方，不给出具体用药剂量
 - 有危及生命的症状时，明确建议立即就医"""
 
-AGENT_SYSTEM_PROMPT = (
+AGENT_SYSTEM_PROMPT = _loaded_sys or (
     "你是一个专业的医疗健康信息助手，具备搜索医学知识的能力，也可以直接根据已有知识给出回答。\n\n"
     + AGENT_TOOL_FORMAT_PROMPT
 )
@@ -77,7 +101,7 @@ THINK_PAT = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 def parse_response(text: str) -> Tuple[Optional[dict], Optional[str], Optional[str]]:
     """
     解析模型单轮输出，返回 (tool_call_dict, answer_str, think_str)。
-    三者互斥：优先检测 tool_call，其次 answer。
+    优先级：tool_call > <answer>标签 > </think>后的裸文本。
     """
     think_match = THINK_PAT.search(text)
     think_str = think_match.group(1).strip() if think_match else None
@@ -93,6 +117,11 @@ def parse_response(text: str) -> Tuple[Optional[dict], Optional[str], Optional[s
     answer_match = ANSWER_PAT.search(text)
     if answer_match:
         return None, answer_match.group(1).strip(), think_str
+
+    if '</think>' in text:
+        after_think = text.split('</think>', 1)[-1].strip()
+        if after_think:
+            return None, after_think, think_str
 
     return None, None, think_str
 
@@ -110,10 +139,16 @@ def load_search_tool(kb_dir: str, device: str = "cpu", top_k: int = 5):
     )
 
 
-def execute_tool(tool_call: dict, search_tool) -> str:
-    """执行工具调用，返回格式化结果字符串"""
+def execute_tool(tool_call: dict, search_tool,
+                 seen_titles: Optional[set] = None,
+                 think_text: Optional[str] = None) -> str:
+    """执行工具调用，返回格式化结果字符串。支持跨轮去重和 HyDE。"""
     name = tool_call.get("name", "")
     args = tool_call.get("arguments", {})
+
+    if think_text and name == "search":
+        args = dict(args)
+        args["hyde_text"] = think_text
 
     if name == "search" and search_tool is not None:
         result = search_tool.execute(args)
@@ -122,12 +157,26 @@ def execute_tool(tool_call: dict, search_tool) -> str:
             data = json.loads(content)
             results = data.get("results", [])
             if not results:
-                return "未找到相关医学信息。"
+                return "未找到相关医学信息。请尝试换用不同的关键词重新搜索。"
+
+            if seen_titles is not None:
+                results = [r for r in results
+                           if r.get("title", "") not in seen_titles]
+                if not results:
+                    return ("搜索结果与之前的搜索重复，未找到新信息。"
+                            "请尝试使用不同角度的关键词搜索。")
+
             lines = []
             for i, r in enumerate(results, 1):
                 title = r.get("title", "")
-                body = r.get("content", "")[:300]
-                lines.append(f"[{i}] {title}\n{body}")
+                body = r.get("content", "")[:400]
+                score = r.get("score", 0)
+
+                if seen_titles is not None:
+                    seen_titles.add(title)
+
+                score_tag = f" (相关度: {score:.2f})" if score else ""
+                lines.append(f"[{i}]{score_tag} {title}\n{body}")
             return "\n\n".join(lines)
         except json.JSONDecodeError:
             return content
@@ -235,6 +284,7 @@ class MedicalAgentInference:
         """基于当前 messages 生成一轮 assistant 回复"""
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=True,
         )
         inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
 
@@ -251,8 +301,10 @@ class MedicalAgentInference:
             )
 
         new_ids = output_ids[0][inputs['input_ids'].shape[1]:]
-        response = self.tokenizer.decode(new_ids, skip_special_tokens=True).strip()
-        return response
+        response = self.tokenizer.decode(new_ids, skip_special_tokens=False).strip()
+        for tag in ('<|im_end|>', '<|endoftext|>', '<|im_start|>'):
+            response = response.replace(tag, '')
+        return response.strip()
 
     # ─────────────────── Agent 循环 ────────────────────
 
@@ -277,6 +329,7 @@ class MedicalAgentInference:
         turns = []
         num_tool_calls = 0
         final_answer = None
+        seen_titles: set = set()
 
         for turn_i in range(self.max_turns):
             response = self._generate_one_turn(messages)
@@ -287,7 +340,8 @@ class MedicalAgentInference:
 
             if tool_call is not None:
                 num_tool_calls += 1
-                tool_result = execute_tool(tool_call, self.search_tool)
+                tool_result = execute_tool(
+                    tool_call, self.search_tool, seen_titles, think)
 
                 if verbose:
                     self._print_tool_result(tool_result)
@@ -500,17 +554,31 @@ def main():
         if not os.path.isabs(output_file):
             output_file = os.path.join(project_root, output_file)
 
-        with open(input_file, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        if input_file.endswith('.jsonl'):
+            data = []
+            with open(input_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        data.append(json.loads(line))
+        else:
+            with open(input_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and 'data' in data:
+                data = data['data']
 
         questions = []
         for item in data:
             if isinstance(item, str):
                 questions.append(item)
             elif isinstance(item, dict):
-                questions.append(
-                    item.get('question') or item.get('query') or item.get('instruction') or ''
-                )
+                q = item.get('question') or item.get('query') or item.get('instruction') or ''
+                if not q and 'messages' in item:
+                    for msg in item['messages']:
+                        if msg.get('role') == 'user' and not msg.get('content', '').startswith('<tool_response>'):
+                            q = msg['content']
+                            break
+                questions.append(q)
 
         if max_samples:
             questions = questions[:max_samples]

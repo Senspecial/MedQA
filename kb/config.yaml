@@ -11,19 +11,18 @@ data:
   #   "question"          - 只对问题编码（推荐：查询通常也是问句）
   #   "answer"            - 只对答案编码（适合症状/概念查询）
   #   "question_answer"   - 问题+答案拼接编码（覆盖广，噪声略大）
-  embed_field: "question"
+  embed_field: "question_answer"
 
   # QA 格式专属：过滤掉答案过短的低质量条目（字符数）
-  min_answer_length: 10
+  min_answer_length: 40
 
+  # 仅用训练集构建知识库，valid/test 不入库（避免评估时数据泄露）
   sources:
     - "../data/SFT/train_zh_0.json"
-    - "../data/SFT/valid_zh_0.json"
 
-  # 最大加载条数，设为 null 则加载全部
-  # 195 万条全量建索引预计需要 ~8GB 内存 + 数小时编码时间
-  # 建议先用 100K 验证效果
-  max_docs: 100000
+  # 最大加载条数，设为 null 则加载全部（195 万条，~8GB 内存 + 数小时编码）
+  # 50 万条是覆盖率与资源的较好平衡点
+  max_docs: 500000
 
   # 文本最大长度（字符数，超长截断）
   max_text_length: 512
@@ -44,9 +43,9 @@ faiss:
   index_type: "ivf"
   # IVF 聚类中心数，建议 ≈ sqrt(doc_count)
   # 10万条 → 316，50万条 → 707，100万条 → 1000
-  nlist: 316
+  nlist: 707
   # 搜索时探测的聚类数，越大越精准越慢，建议 nlist 的 10%
-  nprobe: 32
+  nprobe: 64
 
 # 索引存储路径
 index:
@@ -61,6 +60,24 @@ server:
   default_top_k: 5
   max_top_k: 20
 
-# 搜索配置
+# 搜索增强配置
 search:
   default_top_k: 5
+  # 相似度分数阈值（FAISS 内积分数），低于此值的结果被过滤；0 表示不过滤
+  score_threshold: 0.35
+  # 标题去重阈值（字符 Jaccard 相似度），高于此值视为重复文档
+  dedup_threshold: 0.85
+  # LRU 查询缓存容量，相同查询直接返回缓存结果
+  cache_size: 128
+  # BM25 混合检索：结合向量语义检索和关键词匹配，提升召回多样性
+  enable_bm25: true
+  dense_weight: 0.7          # 向量检索得分权重
+  bm25_weight: 0.3           # BM25 检索得分权重
+  # 医学同义词扩展：自动将常见缩写/口语扩展为标准医学术语
+  enable_synonym: true
+  # 过采样倍数：从 FAISS 取 top_k * factor 个候选，混合重排后取 top_k
+  oversample_factor: 3
+  # HyDE（假设文档嵌入）：用模型 <think> 内容作为补充查询向量
+  # 模型的思考文本包含医学术语，编码后比原始口语查询更接近知识库文档
+  enable_hyde: true
+  hyde_weight: 0.4            # HyDE 向量的融合权重（与原始查询向量取加权最大值）
